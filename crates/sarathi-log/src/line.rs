@@ -21,9 +21,10 @@ use serde::Serialize;
 use serde::de::DeserializeOwned;
 use serde_json::value::RawValue;
 
-use crate::entry::{Body, CallRef, Effect, Entry, Header, Recipe, SegmentReason, Strategy};
+use crate::entry::{Body, CallRef, Effect, Entry, LogHeader, Recipe, SegmentReason, Strategy};
 use crate::error::LogError;
 use crate::log::Log;
+use sarathi_protocol::{HeaderError, SegmentId};
 
 /// Why a line did not decode.
 #[derive(Debug)]
@@ -51,7 +52,7 @@ fn bad(detail: impl Into<String>) -> DecodeError {
 ///
 /// # Errors
 /// Never in practice: the header has only strings and integers.
-pub fn encode_header(header: &Header) -> Result<String, LogError> {
+pub fn encode_header(header: &LogHeader) -> Result<String, LogError> {
     serde_json::to_string(header).map_err(|e| LogError::Invalid {
         seq: Seq(0),
         detail: e.to_string(),
@@ -63,18 +64,14 @@ pub fn encode_header(header: &Header) -> Result<String, LogError> {
 /// # Errors
 /// [`LogError::Format`] for a format this reader does not read; [`LogError::Corrupt`] for a line that is not a
 /// header.
-pub fn decode_header(line: &str) -> Result<Header, LogError> {
-    #[derive(serde::Deserialize)]
-    struct Version {
-        sarathi_log: u32,
-    }
-    let corrupt = |e: serde_json::Error| LogError::Corrupt {
-        line: 0,
-        detail: format!("header: {e}"),
-    };
-    let v: Version = serde_json::from_str(line).map_err(corrupt)?;
-    sarathi_protocol::log::check_version(v.sarathi_log)?;
-    serde_json::from_str(line).map_err(corrupt)
+pub fn decode_header(line: &str) -> Result<LogHeader, LogError> {
+    sarathi_protocol::read_header(line).map_err(|e| match e {
+        HeaderError::Version(v) => LogError::Format(v),
+        e => LogError::Corrupt {
+            line: 0,
+            detail: format!("header: {e}"),
+        },
+    })
 }
 
 struct LineWriter {
@@ -92,7 +89,7 @@ impl LineWriter {
         buf.push_str(",\"ts\":");
         buf.push_str(&e.ts.to_string());
         buf.push_str(",\"kind\":");
-        push_json_string(&mut buf, e.body.kind());
+        push_json_string(&mut buf, e.body.kind().as_str());
         LineWriter {
             buf,
             esc: Vec::new(),
@@ -438,7 +435,12 @@ fn decode_entry(line: &str) -> Result<Entry, DecodeError> {
             }
         }
     };
-    Ok(Entry { seq, seg, ts, body })
+    Ok(Entry {
+        seq,
+        seg: SegmentId(seg),
+        ts,
+        body,
+    })
 }
 
 /// The assistant `content` value inside a response body, if the range holds one JSON value.
@@ -521,7 +523,7 @@ mod tests {
     fn entry(body: Body) -> Entry {
         Entry {
             seq: Seq(3),
-            seg: 1,
+            seg: SegmentId(1),
             ts: 42,
             body,
         }
@@ -644,7 +646,7 @@ mod tests {
     fn unknown_kinds_are_kept_unless_they_must_be_understood() {
         let line = r#"{"seq":3,"seg":1,"ts":42,"kind":"later.thing","x":[1e5]}"#;
         let e = decode_entry(line).unwrap();
-        assert_eq!(e.body.kind(), "later.thing");
+        assert_eq!(e.body.kind().as_str(), "later.thing");
         assert_eq!(encode_entry(&e).unwrap(), line);
         let must = r#"{"seq":3,"seg":1,"ts":42,"kind":"later.thing","must_understand":true}"#;
         assert!(matches!(
@@ -661,7 +663,7 @@ mod tests {
 
     #[test]
     fn headers_check_their_version() {
-        let h = Header::new(crate::new_session_id(), 1, None);
+        let h = crate::new_header(crate::new_session_id(), 1, None);
         let line = encode_header(&h).unwrap();
         assert!(
             line.starts_with(r#"{"sarathi_log":1,"session":""#),
@@ -672,7 +674,7 @@ mod tests {
         assert!(matches!(
             decode_header(&newer),
             Err(LogError::Format(
-                sarathi_protocol::log::VersionError::NewerFormat { found: 2, .. }
+                sarathi_protocol::VersionError::NewerFormat { found: 2, .. }
             ))
         ));
         assert!(matches!(

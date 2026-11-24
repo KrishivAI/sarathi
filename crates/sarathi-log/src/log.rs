@@ -4,7 +4,7 @@
 use sarathi_protocol::{MessageSlice, RawJson, Role, Seq};
 use sha2::{Digest, Sha256};
 
-use crate::entry::{Body, CallRef, Effect, Entry, Header, Recipe};
+use crate::entry::{Body, CallRef, Effect, Entry, LogHeader, Recipe, SegmentId};
 use crate::error::LogError;
 use crate::line::{content_slice, encode_entry};
 
@@ -16,7 +16,7 @@ pub const CUT_SHORT: &str =
 /// [`Log::append`], so a `Log` read from a store is one that store would have accepted.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Log {
-    header: Header,
+    header: LogHeader,
     entries: Vec<Entry>,
 }
 
@@ -81,7 +81,7 @@ pub struct RequestParts<'a> {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Projection {
     /// The current segment.
-    pub segment: u32,
+    pub segment: SegmentId,
     /// The `session.prefix` entry in force, if one was written.
     pub prefix: Option<Seq>,
     /// The slices: the segment's seed, then the segment's own slices, in seq order.
@@ -116,7 +116,7 @@ pub struct ResumeState {
     /// The next seq to append.
     pub next: Seq,
     /// The current segment.
-    pub segment: u32,
+    pub segment: SegmentId,
     /// A user message started a turn that has no `turn.end` yet.
     pub in_turn: bool,
     /// The calls of the last assistant message, if the turn is still open.
@@ -134,7 +134,7 @@ impl ResumeState {
 
 impl Log {
     /// An empty session.
-    pub fn new(header: Header) -> Self {
+    pub fn new(header: LogHeader) -> Self {
         Log {
             header,
             entries: Vec::new(),
@@ -142,7 +142,7 @@ impl Log {
     }
 
     /// The header.
-    pub fn header(&self) -> &Header {
+    pub fn header(&self) -> &LogHeader {
         &self.header
     }
 
@@ -157,8 +157,8 @@ impl Log {
     }
 
     /// The current segment.
-    pub fn segment(&self) -> u32 {
-        self.entries.last().map_or(0, |e| e.seg)
+    pub fn segment(&self) -> SegmentId {
+        self.entries.last().map_or(SegmentId(0), |e| e.seg)
     }
 
     /// The entry at `seq`.
@@ -207,10 +207,10 @@ impl Log {
         let seg = self.segment();
         match &e.body {
             Body::SegmentStart { seed, replaces, .. } => {
-                if e.seg != seg + 1 {
+                if e.seg.0 != seg.0 + 1 {
                     return Err(invalid(format!(
                         "segment.start must open segment {}",
-                        seg + 1
+                        seg.0 + 1
                     )));
                 }
                 for s in seed {
@@ -463,14 +463,14 @@ impl Log {
     ///
     /// # Errors
     /// [`LogError::Invalid`] if `at` is past the end.
-    pub fn lines_sha256(&self, at: Seq) -> Result<String, LogError> {
+    pub fn lines_sha256(&self, at: Seq) -> Result<sarathi_protocol::Sha256, LogError> {
         let part = self.up_to(at)?;
         let mut h = Sha256::new();
         for e in &part.entries {
             h.update(encode_entry(e)?.as_bytes());
             h.update(b"\n");
         }
-        Ok(hex(&h.finalize()))
+        Ok(sarathi_protocol::Sha256(h.finalize().into()))
     }
 }
 

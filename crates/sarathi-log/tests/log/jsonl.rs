@@ -150,7 +150,7 @@ async fn unknown_sessions_and_newer_formats_are_refused() {
     assert!(matches!(
         JsonlStore::new(root.path()).load(id).await,
         Err(LogError::Format(
-            sarathi_protocol::log::VersionError::NewerFormat {
+            sarathi_protocol::VersionError::NewerFormat {
                 found: 2,
                 supported: 1,
             }
