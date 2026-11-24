@@ -11,7 +11,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use sarathi_protocol::{RawJson, Seq};
 
-use crate::entry::{Body, Entry, ForkedFrom, Header, SessionId};
+use crate::entry::{Body, Entry, ForkPoint, LogHeader, SessionId};
 use crate::error::LogError;
 use crate::line::{ReadLog, encode_entry, encode_header, read_log};
 use crate::log::Log;
@@ -77,8 +77,8 @@ impl LogStore for JsonlStore {
     async fn create(
         &self,
         created: u64,
-        forked_from: Option<ForkedFrom>,
-    ) -> Result<Header, LogError> {
+        forked_from: Option<ForkPoint>,
+    ) -> Result<LogHeader, LogError> {
         self.blocking(move |inner| inner.create(created, forked_from))
             .await
     }
@@ -108,8 +108,8 @@ impl Inner {
         self.writers.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
-    fn create(&self, created: u64, forked_from: Option<ForkedFrom>) -> Result<Header, LogError> {
-        let header = Header::new(crate::new_session_id(), created, forked_from);
+    fn create(&self, created: u64, forked_from: Option<ForkPoint>) -> Result<LogHeader, LogError> {
+        let header = crate::new_header(crate::new_session_id(), created, forked_from);
         let dir = self.dir(header.session);
         std::fs::create_dir_all(&self.root)?;
         std::fs::create_dir(&dir)?;

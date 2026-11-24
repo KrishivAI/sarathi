@@ -1,4 +1,4 @@
-{"sarathi_log":1,"session":"01a20f64-ffbf-7561-a6d5-76677dfb8a07","created":1764057600000,"writer":"sarathi-log 0.0.0","forked_from":null}
+{"sarathi_log":1,"session":"01a20fe3-19e5-77e5-b083-df0799bbe8f9","created":"2025-11-25T08:00:00Z","writer":"sarathi-log 0.0.0","forked_from":null}
 {"seq":1,"seg":0,"ts":1764057600001,"kind":"session.prefix","protocol":"anthropic-messages","system":[{"type":"text","text":"You edit themes.","cache_control":{"type":"ephemeral"}}],"tools":[{"name":"edit","input_schema":{"type":"object"}},{"name":"look","input_schema":{"type":"object"}}]}
 {"seq":2,"seg":0,"ts":1764057600002,"kind":"message.user","content":"one"}
 {"seq":3,"seg":0,"ts":1764057600003,"kind":"model.request","prefix":1,"messages":[2],"params":{"model":"m","max_tokens":1024},"sha256":"cb5d26c8a0b5cc09bb347b42cc0d4b10c37c6f8bbcb3d2404568dd176d381ead"}

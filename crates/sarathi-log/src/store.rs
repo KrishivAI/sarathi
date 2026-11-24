@@ -7,7 +7,7 @@ use std::sync::{Mutex, PoisonError};
 
 use sarathi_protocol::Seq;
 
-use crate::entry::{Body, Entry, ForkedFrom, Header, SegmentReason, SessionId};
+use crate::entry::{Body, Entry, ForkPoint, LogHeader, SegmentId, SegmentReason, SessionId};
 use crate::error::LogError;
 use crate::log::Log;
 
@@ -50,8 +50,8 @@ pub trait LogStore: Send + Sync {
     fn create(
         &self,
         created: u64,
-        forked_from: Option<ForkedFrom>,
-    ) -> impl Future<Output = Result<Header, LogError>> + Send;
+        forked_from: Option<ForkPoint>,
+    ) -> impl Future<Output = Result<LogHeader, LogError>> + Send;
 
     /// Appends `entries` if the session's next seq is `expected`; all or none. Returns the next seq after them.
     fn append(
@@ -83,9 +83,9 @@ impl LogStore for MemoryStore {
     async fn create(
         &self,
         created: u64,
-        forked_from: Option<ForkedFrom>,
-    ) -> Result<Header, LogError> {
-        let header = Header::new(crate::new_session_id(), created, forked_from);
+        forked_from: Option<ForkPoint>,
+    ) -> Result<LogHeader, LogError> {
+        let header = crate::new_header(crate::new_session_id(), created, forked_from);
         let mut map = self.sessions.lock().unwrap_or_else(PoisonError::into_inner);
         map.insert(header.session, Log::new(header.clone()));
         Ok(header)
@@ -141,16 +141,12 @@ pub async fn fork<S: LogStore + ?Sized>(
     if at.0 == 0 || !parent.resume().at_boundary() {
         return Err(LogError::NotABoundary(at));
     }
-    let forked_from = ForkedFrom {
-        session,
-        seq: at,
-        sha256: parent.lines_sha256(at)?,
-    };
+    let forked_from = ForkPoint::new(session, at, parent.lines_sha256(at)?);
     let header = store.create(ts, Some(forked_from)).await?;
     let mut entries = parent.entries().to_vec();
     entries.push(Entry {
         seq: Seq(at.0 + 1),
-        seg: parent.segment() + 1,
+        seg: SegmentId(parent.segment().0 + 1),
         ts,
         body: Body::SegmentStart {
             reason: SegmentReason::Fork,

@@ -175,12 +175,15 @@ async fn check(path: &Path) {
             assert_eq!(resume.pending_model, Some(Seq(24)));
         }
         "fork-child.jsonl" => {
-            let from = log.header().forked_from.clone().unwrap();
+            let from = log.header().forked_from.unwrap();
             assert_eq!(from.seq, Seq(11));
             assert!(resume.at_boundary());
         }
         "unknown-kind.jsonl" => {
-            assert_eq!(log.entries().last().unwrap().body.kind(), "later.kind");
+            assert_eq!(
+                log.entries().last().unwrap().body.kind().as_str(),
+                "later.kind"
+            );
             assert!(resume.at_boundary());
         }
         _ => assert!(resume.at_boundary(), "{name}"),

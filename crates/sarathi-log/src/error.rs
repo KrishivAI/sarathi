@@ -23,7 +23,7 @@ pub enum LogError {
     Locked(String),
     /// The log's format is one this reader does not read (newer, or older than N−1). It is never guessed at.
     #[error(transparent)]
-    Format(#[from] sarathi_protocol::log::VersionError),
+    Format(#[from] sarathi_protocol::VersionError),
     /// A line that is not the last one does not decode. Never repaired; the host decides.
     #[error("corrupt log line {line}: {detail}")]
     Corrupt {

@@ -106,7 +106,7 @@ async fn invariants_refuse_the_whole_batch<S: LogStore>(store: &S) {
     let p = s.prefix();
     let id = s.log.header().session;
     let mut wrong_seg = s.user("hi");
-    wrong_seg.seg = 1;
+    wrong_seg.seg = sarathi_log::SegmentId(1);
     let r = store
         .append(id, Seq(1), vec![p.clone(), wrong_seg], Durability::Durable)
         .await;
@@ -116,7 +116,7 @@ async fn invariants_refuse_the_whole_batch<S: LogStore>(store: &S) {
     );
     let dangling = sarathi_log::Entry {
         seq: Seq(2),
-        seg: 0,
+        seg: sarathi_log::SegmentId(0),
         ts: 0,
         body: Body::AssistantMessage {
             from: Seq(1),
@@ -193,7 +193,7 @@ async fn fork_projects_the_parents_next_request<S: LogStore>(store: &S) {
     let at = Seq(11); // the first turn's end
     let child = fork(store, parent, at, 7).await.unwrap();
     let child_log = store.load(child).await.unwrap().log;
-    let from = child_log.header().forked_from.clone().unwrap();
+    let from = child_log.header().forked_from.unwrap();
     assert_eq!((from.session, from.seq), (parent, at));
     assert_eq!(from.sha256, s.log.lines_sha256(at).unwrap());
     let params = raw(r#"{"model":"m"}"#);
@@ -230,7 +230,7 @@ async fn a_compaction_segment_projects_its_seed_and_its_own_slices<S: LogStore>(
     append(store, &s, v).await;
     let log = store.load(s.log.header().session).await.unwrap().log;
     let p = log.projection();
-    assert_eq!(p.segment, 1);
+    assert_eq!(p.segment.0, 1);
     assert_eq!(p.prefix, Some(Seq(1)));
     assert_eq!(p.messages, [Seq(2), Seq(20), Seq(23)]);
     // Nothing replaced is gone.

@@ -74,7 +74,7 @@ impl Script {
     /// Appends one body to the mirror and returns the entry for the store.
     pub(crate) fn push(&mut self, body: Body) -> Entry {
         let seg = match body {
-            Body::SegmentStart { .. } => self.log.segment() + 1,
+            Body::SegmentStart { .. } => sarathi_log::SegmentId(self.log.segment().0 + 1),
             _ => self.log.segment(),
         };
         self.ts += 1;
