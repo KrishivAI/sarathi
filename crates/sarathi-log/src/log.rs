@@ -234,6 +234,9 @@ impl Log {
                     )));
                 }
             },
+            Body::SegmentSeed { from: Some(f), .. } => {
+                self.expect_slice(*f).map_err(invalid)?;
+            }
             Body::ModelRequest { recipe, sha256 } => {
                 match self.get(recipe.prefix).map(|p| &p.body) {
                     Some(Body::SessionPrefix { .. }) => {}
@@ -275,6 +278,15 @@ impl Log {
         match self.get(seq).map(|e| &e.body) {
             Some(Body::UserMessage { content, .. }) => Ok(Slice::User { content }),
             Some(Body::ToolResult { call, block, .. }) => Ok(Slice::ToolResult { call, block }),
+            Some(Body::SegmentSeed {
+                role: Role::User,
+                content,
+                ..
+            }) => Ok(Slice::User { content }),
+            Some(Body::SegmentSeed { content, calls, .. }) => Ok(Slice::Assistant {
+                content: content.clone(),
+                calls,
+            }),
             Some(Body::AssistantMessage { from, calls }) => {
                 match self.get(*from).map(|e| &e.body) {
                     Some(Body::ModelResponse { body, content, .. }) => Ok(Slice::Assistant {
@@ -303,6 +315,8 @@ impl Log {
             }
             match &e.body {
                 Body::SegmentStart { seed, .. } => messages.extend_from_slice(seed),
+                // Sent only through a seed that names it.
+                Body::SegmentSeed { .. } => {}
                 b if b.is_slice() => messages.push(e.seq),
                 _ => {}
             }

@@ -1,0 +1,39 @@
+# Session log format
+
+The on-disk format of `sarathi-log`: one JSONL file per session, a header line, then one entry per line. This note
+records the format's rules and every change to it. The code is the reference for field details
+(`crates/sarathi-log/src/line.rs`); committed fixtures for each version are in `crates/sarathi-log/fixtures/log/`.
+
+## Versioning
+- The header's `sarathi_log` is the format version. A reader of version N reads N and N-1 and refuses anything else
+  (newer formats are never guessed at).
+- Within a version, an entry of an unknown kind is kept as its whole line and skipped, unless it carries
+  `"must_understand": true`, in which case the reader refuses the log.
+- Changing what an existing kind or field means, or how lines are framed, needs a new version and a new fixture
+  directory; old fixture directories stay and stay green.
+- A new kind that an older reader could misread if it skipped it is written with `must_understand`.
+- Readers ignore unknown fields of a known kind and do not keep them, so a new field on a known kind is only safe
+  when ignoring it gives the same meaning. Otherwise it is a new kind or a new version.
+- Fork hashes (`forked_from.sha256`) are over the parent's encoded entry lines, so a reader must re-encode a line
+  it read to the same bytes. Names of open sets (error kinds, outcomes) are therefore stored as the names read.
+
+## Version 1
+**Not frozen until the first release.** Until then version 1 may still change in place; logs written by earlier
+development builds may not load.
+
+Header: `sarathi_log`, `session` (UUID v7), `created` (RFC 3339 UTC, to the second), `writer`, `forked_from`
+(`session`, `seq`, `sha256` of the parent's lines 1..=seq) or null.
+
+Entry fields: `seq` (dense from 1), `seg` (segment, +1 at each `segment.start`), `ts` (ms since the epoch,
+informational), `kind`, then the kind's fields; `esc` lists stored slices written as strings because they hold a
+raw line break.
+
+Kinds: `session.prefix`, `message.user`, `model.request`, `model.response`, `model.failure`, `message.assistant`,
+`tool.ask`, `tool.decision`, `tool.start`, `tool.result`, `segment.seed` (`must_understand`), `segment.start`,
+`turn.end`, `note`.
+
+### Changes before the first release
+- `created` changed from integer milliseconds to RFC 3339 text; `forked_from.sha256` is a typed digest (same text).
+- `segment.seed` added: a slice made for a compaction seed (`role`, `content`, optional `from`, optional `calls`).
+  It is projected only through a `segment.start` that names it and ignored by resume, so a seed batch cut short
+  before its `segment.start` leaves the old segment's projection and resume unchanged.

@@ -255,6 +255,20 @@ pub fn encode_entry(e: &Entry) -> Result<String, LogError> {
                 w.value("is_error", is_error)?;
                 w.opt_slice("spill", spill.as_ref());
             }
+            Body::SegmentSeed {
+                role,
+                content,
+                from,
+                calls,
+            } => {
+                w.value("must_understand", &true)?;
+                w.value("role", role)?;
+                w.slice("content", content);
+                w.opt_value("from", from.as_ref())?;
+                if !calls.is_empty() {
+                    w.value("calls", calls)?;
+                }
+            }
             Body::SegmentStart {
                 reason,
                 strategy,
@@ -421,6 +435,12 @@ fn decode_entry(line: &str) -> Result<Entry, DecodeError> {
         },
         "turn.end" => Body::TurnEnd {
             outcome: f.typed("outcome")?,
+        },
+        "segment.seed" => Body::SegmentSeed {
+            role: f.typed("role")?,
+            content: f.slice("content")?,
+            from: f.opt_typed("from")?,
+            calls: f.opt_typed::<Vec<CallRef>>("calls")?.unwrap_or_default(),
         },
         "note" => Body::Note {
             data: f.slice("data")?,
@@ -607,6 +627,21 @@ mod tests {
                     id: "toolu_1".into(),
                     name: "edit".into(),
                 }],
+            },
+            Body::SegmentSeed {
+                role: sarathi_protocol::Role::Assistant,
+                content: raw("[{\"type\":\"text\",\"text\":\"a\\nb\"},\n {\"z\":1e5}]"),
+                from: Some(Seq(2)),
+                calls: vec![CallRef {
+                    id: "toolu_1".into(),
+                    name: "edit".into(),
+                }],
+            },
+            Body::SegmentSeed {
+                role: sarathi_protocol::Role::User,
+                content: raw(r#""note""#),
+                from: None,
+                calls: vec![],
             },
             Body::ToolAsk {
                 call: "toolu_1".into(),
