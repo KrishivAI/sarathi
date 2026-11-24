@@ -5,6 +5,7 @@ sarathi-protocol = 0
 sarathi-provider = 1
 sarathi-log = 1
 sarathi-tools = 2
+sarathi-context = 2
 sarathi-core = 3
 sarathi-mcp = 3
 sarathi-skills = 3

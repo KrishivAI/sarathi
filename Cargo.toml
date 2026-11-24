@@ -16,6 +16,7 @@ publish = false
 [workspace.dependencies]
 sarathi-protocol = { path = "crates/sarathi-protocol" }
 sarathi-log = { path = "crates/sarathi-log" }
+sarathi-context = { path = "crates/sarathi-context" }
 sha2 = { version = "0.11", default-features = false }
 tokio = { version = "1.53", default-features = false }
 uuid = { version = "1.28", default-features = false, features = ["std"] }
