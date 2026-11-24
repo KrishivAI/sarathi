@@ -21,10 +21,7 @@ use serde::Serialize;
 use serde::de::DeserializeOwned;
 use serde_json::value::RawValue;
 
-use crate::entry::{
-    Body, CallRef, Effect, Entry, FORMAT_VERSION, Header, OLDEST_READABLE, Recipe, SegmentReason,
-    Strategy,
-};
+use crate::entry::{Body, CallRef, Effect, Entry, Header, Recipe, SegmentReason, Strategy};
 use crate::error::LogError;
 use crate::log::Log;
 
@@ -64,7 +61,7 @@ pub fn encode_header(header: &Header) -> Result<String, LogError> {
 /// Reads the header line and checks its format version.
 ///
 /// # Errors
-/// [`LogError::NewerFormat`] for a format this reader does not read; [`LogError::Corrupt`] for a line that is not a
+/// [`LogError::Format`] for a format this reader does not read; [`LogError::Corrupt`] for a line that is not a
 /// header.
 pub fn decode_header(line: &str) -> Result<Header, LogError> {
     #[derive(serde::Deserialize)]
@@ -76,13 +73,7 @@ pub fn decode_header(line: &str) -> Result<Header, LogError> {
         detail: format!("header: {e}"),
     };
     let v: Version = serde_json::from_str(line).map_err(corrupt)?;
-    if v.sarathi_log > FORMAT_VERSION || v.sarathi_log < OLDEST_READABLE {
-        return Err(LogError::NewerFormat {
-            found: v.sarathi_log,
-            oldest: OLDEST_READABLE,
-            supported: FORMAT_VERSION,
-        });
-    }
+    sarathi_protocol::log::check_version(v.sarathi_log)?;
     serde_json::from_str(line).map_err(corrupt)
 }
 
@@ -487,7 +478,7 @@ pub fn render_log(log: &Log) -> Result<String, LogError> {
 /// line that does not decode, or breaks a log invariant, is corruption.
 ///
 /// # Errors
-/// [`LogError::Corrupt`], [`LogError::NewerFormat`] or [`LogError::MustUnderstand`].
+/// [`LogError::Corrupt`], [`LogError::Format`] or [`LogError::MustUnderstand`].
 pub fn read_log(bytes: &[u8]) -> Result<ReadLog, LogError> {
     let good_len = bytes.iter().rposition(|b| *b == b'\n').map_or(0, |i| i + 1);
     let torn_bytes = (bytes.len() - good_len) as u64;
@@ -670,7 +661,7 @@ mod tests {
 
     #[test]
     fn headers_check_their_version() {
-        let h = Header::new(crate::SessionId::new(), 1, None);
+        let h = Header::new(crate::new_session_id(), 1, None);
         let line = encode_header(&h).unwrap();
         assert!(
             line.starts_with(r#"{"sarathi_log":1,"session":""#),
@@ -680,7 +671,9 @@ mod tests {
         let newer = line.replacen("\"sarathi_log\":1", "\"sarathi_log\":2", 1);
         assert!(matches!(
             decode_header(&newer),
-            Err(LogError::NewerFormat { found: 2, .. })
+            Err(LogError::Format(
+                sarathi_protocol::log::VersionError::NewerFormat { found: 2, .. }
+            ))
         ));
         assert!(matches!(
             decode_header("{}"),

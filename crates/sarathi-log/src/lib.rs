@@ -22,7 +22,7 @@ mod store;
 
 pub use entry::{
     Body, CallRef, Effect, Entry, FORMAT_VERSION, ForkedFrom, Header, OLDEST_READABLE, Recipe,
-    SegmentReason, SessionId, Strategy,
+    SegmentReason, SessionId, Strategy, new_session_id,
 };
 pub use error::LogError;
 #[cfg(feature = "jsonl")]

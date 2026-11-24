@@ -1,50 +1,18 @@
 // SPDX-License-Identifier: Apache-2.0
 //! The log's entries: the header line and one [`Entry`] per later line.
 
-use std::fmt;
 use std::ops::Range;
-use std::str::FromStr;
 
 use sarathi_protocol::{RawJson, Seq, Usage};
 use serde::{Deserialize, Serialize};
 
-/// The format this crate writes.
-pub const FORMAT_VERSION: u32 = 1;
+pub use sarathi_protocol::SegmentReason;
+pub use sarathi_protocol::SessionId;
+pub use sarathi_protocol::log::{FORMAT_VERSION, OLDEST_READABLE};
 
-/// The oldest format this crate reads. A reader of format N reads N and N−1; format 1 is the first, so there is no
-/// N−1 yet.
-pub const OLDEST_READABLE: u32 = 1;
-
-/// A session's id: a UUID v7, so ids sort by creation time and make sortable directory names.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
-#[serde(transparent)]
-pub struct SessionId(uuid::Uuid);
-
-impl SessionId {
-    /// A new time-ordered id.
-    pub fn new() -> Self {
-        SessionId(uuid::Uuid::now_v7())
-    }
-}
-
-impl Default for SessionId {
-    fn default() -> Self {
-        SessionId::new()
-    }
-}
-
-impl fmt::Display for SessionId {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        self.0.hyphenated().fmt(f)
-    }
-}
-
-impl FromStr for SessionId {
-    type Err = uuid::Error;
-
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
-        uuid::Uuid::parse_str(s).map(SessionId)
-    }
+/// A new session id: a UUID v7, so ids sort by creation time and make sortable directory names.
+pub fn new_session_id() -> SessionId {
+    SessionId(uuid::Uuid::now_v7().as_u128())
 }
 
 /// Where a forked session came from.
@@ -108,18 +76,6 @@ pub enum Effect {
     Read,
     /// Side-effecting: never run again once started.
     Write,
-}
-
-/// Why a segment started.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum SegmentReason {
-    /// The context was compacted.
-    Compaction,
-    /// The session moved to another provider protocol; the seed is the history translated once.
-    ProtocolSwitch,
-    /// The session is a fork; the seed is the parent's projection at the fork point.
-    Fork,
 }
 
 /// How a compaction made its seed.

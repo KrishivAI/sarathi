@@ -21,16 +21,9 @@ pub enum LogError {
     /// The session is held by another writer (another process, or another store over the same directory).
     #[error("session {0} is locked by another writer")]
     Locked(String),
-    /// The log was written by a newer format than this reader supports. It is never guessed at.
-    #[error("log format {found} is newer than this reader (reads {oldest} to {supported})")]
-    NewerFormat {
-        /// The format in the header.
-        found: u32,
-        /// The oldest format this reader reads.
-        oldest: u32,
-        /// The newest format this reader reads.
-        supported: u32,
-    },
+    /// The log's format is one this reader does not read (newer, or older than N−1). It is never guessed at.
+    #[error(transparent)]
+    Format(#[from] sarathi_protocol::log::VersionError),
     /// A line that is not the last one does not decode. Never repaired; the host decides.
     #[error("corrupt log line {line}: {detail}")]
     Corrupt {
