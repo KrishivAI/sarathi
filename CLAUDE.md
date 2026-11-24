@@ -29,7 +29,7 @@ Lint exceptions are `#[expect(lint, reason = "...")]`, never a bare `#[allow]`. 
 
 ## Layering (enforced by `scripts/layering.py`)
 A crate depends only on crates in the same or a lower layer.
-- S0 protocol · S1 provider, log · S2 tools · S3 core, mcp, skills · S4 eval · S5 `sarathi` facade
+- S0 protocol · S1 provider, log · S2 tools, context · S3 core, mcp, skills · S4 eval · S5 `sarathi` facade
 A new crate: add it to `scripts/layers.toml` and the workspace, and write its `CLAUDE.md`.
 
 ## Design rules (each is a review line)

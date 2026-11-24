@@ -27,7 +27,7 @@ It is not a workflow framework and not a model gateway.
 |---|---|---|
 | S0 | `sarathi-protocol` | ops, events, log entry schema, content blocks |
 | S1 | `sarathi-provider`, `sarathi-log` | model wire clients; the append-only log and stores |
-| S2 | `sarathi-tools` | tool trait, permission rules, hooks |
+| S2 | `sarathi-tools`, `sarathi-context` | tool trait, permission rules, hooks; overflow fallback, compaction seeds, output spill |
 | S3 | `sarathi-core`, `sarathi-mcp`, `sarathi-skills` | the run loop; MCP client; skill and agent definitions |
 | S4 | `sarathi-eval` | scripted provider, cassettes, brief runner, metrics |
 | S5 | `sarathi` | the facade crate |
