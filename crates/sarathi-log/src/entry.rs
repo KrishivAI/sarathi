@@ -3,13 +3,17 @@
 
 use std::ops::Range;
 
-use sarathi_protocol::{RawJson, Seq, Usage};
+use sarathi_protocol::{RawJson, Role, Seq, Usage};
 use serde::{Deserialize, Serialize};
 
 pub use sarathi_protocol::{
     EntryKind, ErrorKind, FORMAT_VERSION, ForkPoint, LogHeader, OLDEST_READABLE, Outcome,
     SegmentId, SegmentReason, SessionId,
 };
+
+/// The kind name of [`Body::SegmentSeed`]. Not yet one of the protocol's [`EntryKind`]s, so it reads as
+/// [`EntryKind::Other`] there.
+pub const SEGMENT_SEED: &str = "segment.seed";
 
 /// A new session id: a UUID v7, so ids sort by creation time and make sortable directory names.
 pub fn new_session_id() -> SessionId {
@@ -33,9 +37,11 @@ pub fn new_header(
     }
 }
 
-/// `ms` milliseconds after the Unix epoch as RFC 3339 in UTC, to the second (`2026-11-25T08:00:00Z`).
+/// `ms` milliseconds after the Unix epoch as RFC 3339 in UTC, to the second (`2026-11-25T08:00:00Z`). Times after
+/// the end of year 9999, which RFC 3339 cannot write, are written as its last second.
 pub fn rfc3339_utc(ms: u64) -> String {
-    let secs = ms / 1000;
+    const LAST: u64 = 253_402_300_799; // 9999-12-31T23:59:59Z
+    let secs = (ms / 1000).min(LAST);
     let (days, rem) = (secs / 86_400, secs % 86_400);
     // Civil date from days since 1970-01-01 (H. Hinnant's algorithm), in unsigned arithmetic: days are never negative.
     let z = days + 719_468;
@@ -214,6 +220,20 @@ pub enum Body {
         /// Where the full output was spilled, if it was.
         spill: Option<RawJson>,
     },
+    /// `segment.seed`: a slice made for a compaction seed (a note, or an earlier turn re-rendered without its
+    /// thinking). Written with `must_understand`, so a reader that does not know the kind refuses the log instead of
+    /// misreading it. It is sent only where a `segment.start` names it in its seed: a batch cut short before its
+    /// `segment.start` leaves the old segment's projection and resume as they were.
+    SegmentSeed {
+        /// The message's role.
+        role: Role,
+        /// The `content` value.
+        content: RawJson,
+        /// The slice it was made from, if any.
+        from: Option<Seq>,
+        /// An assistant copy's client tool calls (all answered in the kept turn).
+        calls: Vec<CallRef>,
+    },
     /// `segment.start`: a new request projection starts here.
     SegmentStart {
         /// Why.
@@ -258,6 +278,7 @@ impl Body {
             Body::ToolDecision { .. } => EntryKind::ToolDecision,
             Body::ToolStart { .. } => EntryKind::ToolStart,
             Body::ToolResult { .. } => EntryKind::ToolResult,
+            Body::SegmentSeed { .. } => EntryKind::from_name(SEGMENT_SEED),
             Body::SegmentStart { .. } => EntryKind::SegmentStart,
             Body::TurnEnd { .. } => EntryKind::TurnEnd,
             Body::Note { .. } => EntryKind::Note,
@@ -286,7 +307,10 @@ impl Body {
     pub fn is_slice(&self) -> bool {
         matches!(
             self,
-            Body::UserMessage { .. } | Body::AssistantMessage { .. } | Body::ToolResult { .. }
+            Body::UserMessage { .. }
+                | Body::AssistantMessage { .. }
+                | Body::ToolResult { .. }
+                | Body::SegmentSeed { .. }
         )
     }
 }
@@ -306,6 +330,7 @@ mod tests {
         assert_eq!(rfc3339_utc(951_782_400_000), "2000-02-29T00:00:00Z");
         assert_eq!(rfc3339_utc(1_795_593_600_999), "2026-11-25T08:00:00Z");
         assert_eq!(rfc3339_utc(4_107_542_399_000), "2100-02-28T23:59:59Z");
+        assert_eq!(rfc3339_utc(u64::MAX), "9999-12-31T23:59:59Z");
     }
 
     #[test]

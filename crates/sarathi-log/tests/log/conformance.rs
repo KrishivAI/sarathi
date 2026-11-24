@@ -5,7 +5,7 @@ use std::sync::Arc;
 
 use sarathi_log::{
     Body, CallStatus, Durability, Effect, JsonlStore, Log, LogError, LogStore, MemoryStore,
-    SegmentReason, Slice, encode_entry, fork, sha256_hex,
+    ResumeState, SegmentReason, Slice, encode_entry, fork, sha256_hex,
 };
 use sarathi_protocol::Seq;
 
@@ -239,6 +239,76 @@ async fn a_compaction_segment_projects_its_seed_and_its_own_slices<S: LogStore>(
     assert_eq!(r.messages, p.messages);
 }
 
+/// A compaction batch (seed slices, then its `segment.start`) cut short at every entry: the old segment projects and
+/// resumes as before until the `segment.start` is written; after it, the seed is the projection.
+async fn a_seed_batch_cut_short_leaves_the_old_segment_as_it_was<S: LogStore>(store: &S) {
+    let mut s = new_session(store).await;
+    let mut v = vec![s.prefix()];
+    v.extend(s.tool_turn("one", "toolu_01"));
+    v.extend(s.tool_turn("two", "toolu_02"));
+    v.push(s.user("three"));
+    append(store, &s, v).await;
+    let before = s.log.clone();
+    let note = s.push(Body::SegmentSeed {
+        role: sarathi_protocol::Role::User,
+        content: raw(r#""earlier turns removed""#),
+        from: None,
+        calls: vec![],
+    });
+    // Turn two's first assistant message (seq 15) without its thinking.
+    let copy = s.push(Body::SegmentSeed {
+        role: sarathi_protocol::Role::Assistant,
+        content: raw(r#"[{"type":"tool_use","id":"toolu_02","name":"edit","input":{"path":"a.css","z":1e5}}]"#),
+        from: Some(Seq(15)),
+        calls: vec![sarathi_log::CallRef {
+            id: "toolu_02".into(),
+            name: "edit".into(),
+        }],
+    });
+    let seed = vec![
+        Seq(2),
+        note.seq,
+        Seq(12),
+        copy.seq,
+        Seq(17),
+        Seq(20),
+        Seq(22),
+    ];
+    let start = s.compact(seed.clone(), Seq(1)..note.seq);
+    let batch = vec![note, copy, start];
+    for cut in 0..batch.len() {
+        let mut part = before.clone();
+        part.append(part.next_seq(), batch[..cut].to_vec()).unwrap();
+        assert_eq!(part.projection(), before.projection(), "cut at {cut}");
+        assert_eq!(
+            part.resume(),
+            ResumeState {
+                next: part.next_seq(),
+                ..before.resume()
+            },
+            "cut at {cut}"
+        );
+    }
+    append(store, &s, batch).await;
+    let log = store.load(s.log.header().session).await.unwrap().log;
+    assert_eq!(log, s.log);
+    assert_eq!(log.projection().messages, seed);
+    let Slice::Assistant { content, calls } = log.slice(seed[3]).unwrap() else {
+        panic!("the copy is an assistant slice");
+    };
+    assert!(!content.as_str().contains("thinking"));
+    assert_eq!(calls.len(), 1);
+    assert!(matches!(log.slice(seed[1]), Ok(Slice::User { .. })));
+    assert!(log.resume().in_turn);
+    assert!(log.resume().at_boundary());
+    // A reader that does not know the kind refuses the log.
+    let line = encode_entry(&log.entries()[usize::try_from(seed[1].0).unwrap() - 1]).unwrap();
+    assert!(
+        line.contains(r#""kind":"segment.seed","must_understand":true"#),
+        "{line}"
+    );
+}
+
 macro_rules! conformance {
     ($($name:ident),* $(,)?) => {
         mod memory {
@@ -265,6 +335,7 @@ conformance!(
     a_started_read_is_run_again,
     fork_projects_the_parents_next_request,
     a_compaction_segment_projects_its_seed_and_its_own_slices,
+    a_seed_batch_cut_short_leaves_the_old_segment_as_it_was,
 );
 
 #[tokio::test(flavor = "multi_thread")]

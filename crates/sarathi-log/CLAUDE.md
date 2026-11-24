@@ -6,6 +6,10 @@ invariants, request projection, recipe check and resume (`log.rs`), the `LogStor
 Rules:
 - Nothing is edited or deleted. Compaction, a protocol switch and a fork start a new segment (`segment.start`).
 - A stored slice keeps its bytes: written raw, or as a string listed in the line's `esc` when it holds a line break.
+- `segment.seed` (written with `must_understand`) holds a slice made for a compaction seed: a note, or an earlier
+  turn re-rendered without thinking. It is sent only through a `segment.start` that names it, and resume ignores it,
+  so a seed batch cut short leaves the old segment as it was.
+- Format changes are recorded in `docs/design/log-format.md`.
 - `model.request` stores a recipe and the SHA-256 of the body sent; `Log::verify_requests` rebuilds and checks it.
 - Crash rule support: `resume` reports each open call as not started, started read (run again) or started write
   (never run again; answer with `CUT_SHORT`).

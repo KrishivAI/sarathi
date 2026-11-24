@@ -22,8 +22,8 @@ mod store;
 
 pub use entry::{
     Body, CallRef, Effect, Entry, EntryKind, ErrorKind, FORMAT_VERSION, ForkPoint, LogHeader,
-    OLDEST_READABLE, Outcome, Recipe, SegmentId, SegmentReason, SessionId, Strategy, new_header,
-    new_session_id, rfc3339_utc,
+    OLDEST_READABLE, Outcome, Recipe, SEGMENT_SEED, SegmentId, SegmentReason, SessionId, Strategy,
+    new_header, new_session_id, rfc3339_utc,
 };
 pub use error::LogError;
 #[cfg(feature = "jsonl")]
