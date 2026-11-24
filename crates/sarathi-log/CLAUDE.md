@@ -1,3 +1,17 @@
 # sarathi-log (S1)
-Store trait with optimistic append, JSONL and in-memory stores, segments and compaction events, resume and fork, the
-version header and the N-1 reader. Status: stub.
+The append-only session log: entries and the line codec (`entry.rs`, `line.rs`), the in-memory `Log` with its
+invariants, request projection, recipe check and resume (`log.rs`), the `LogStore` seam, `MemoryStore` and `fork`
+(`store.rs`), and the JSONL file store (`jsonl.rs`, feature `jsonl`, default on).
+
+Rules:
+- Nothing is edited or deleted. Compaction, a protocol switch and a fork start a new segment (`segment.start`).
+- A stored slice keeps its bytes: written raw, or as a string listed in the line's `esc` when it holds a line break.
+- `model.request` stores a recipe and the SHA-256 of the body sent; `Log::verify_requests` rebuilds and checks it.
+- Crash rule support: `resume` reports each open call as not started, started read (run again) or started write
+  (never run again; answer with `CUT_SHORT`).
+- Format version in the header; a reader of N reads N and N−1. Changing the meaning of a kind or the line framing
+  bumps the version and adds `fixtures/log/v<N>/`; old fixture directories stay and stay green. Regenerate only the
+  current version's fixtures (`SARATHI_LOG_WRITE_FIXTURES=1`).
+
+Tests: `tests/log/` (one binary, needs `jsonl`): store conformance on both stores, torn tail at every byte, lock,
+crash matrix (the test binary re-runs itself as an aborting child), committed fixtures.

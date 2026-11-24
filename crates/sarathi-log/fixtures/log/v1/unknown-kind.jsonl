@@ -1,0 +1,8 @@
+{"sarathi_log":1,"session":"01a20f64-ffb3-7252-9b2a-dd8b5fcfe5ca","created":1764057600000,"writer":"sarathi-log 0.0.0","forked_from":null}
+{"seq":1,"seg":0,"ts":1764057600001,"kind":"session.prefix","protocol":"anthropic-messages","system":[{"type":"text","text":"You edit themes.","cache_control":{"type":"ephemeral"}}],"tools":[{"name":"edit","input_schema":{"type":"object"}},{"name":"look","input_schema":{"type":"object"}}]}
+{"seq":2,"seg":0,"ts":1764057600002,"kind":"message.user","content":"Make the header blue."}
+{"seq":3,"seg":0,"ts":1764057600003,"kind":"model.request","prefix":1,"messages":[2],"params":{"model":"m","max_tokens":1024},"sha256":"61ff3c2361166aa979c73c0b0bd04a5c16728f6e1c47578b317ad65cc9d5f1dd"}
+{"seq":4,"seg":0,"ts":1764057600004,"kind":"model.response","body":{"id":"msg_1","type":"message","role":"assistant","content":[{"type":"text","text":"Which blue?"}],"stop_reason":"end_turn","usage":{"input_tokens":10,"output_tokens":5}},"content":[60,98],"request_id":"req_1","usage":{"input_tokens":10,"output_tokens":5,"cache_creation_input_tokens":0,"cache_read_input_tokens":0}}
+{"seq":5,"seg":0,"ts":1764057600005,"kind":"message.assistant","from":4,"calls":[]}
+{"seq":6,"seg":0,"ts":1764057600006,"kind":"turn.end","outcome":"finished"}
+{"seq":7,"seg":0,"ts":1764057600100,"kind":"later.kind","x":[1e5]}

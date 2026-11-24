@@ -1,0 +1,22 @@
+{"sarathi_log":1,"session":"01a20f64-ffbf-7561-a6d5-76677dfb8a07","created":1764057600000,"writer":"sarathi-log 0.0.0","forked_from":null}
+{"seq":1,"seg":0,"ts":1764057600001,"kind":"session.prefix","protocol":"anthropic-messages","system":[{"type":"text","text":"You edit themes.","cache_control":{"type":"ephemeral"}}],"tools":[{"name":"edit","input_schema":{"type":"object"}},{"name":"look","input_schema":{"type":"object"}}]}
+{"seq":2,"seg":0,"ts":1764057600002,"kind":"message.user","content":"one"}
+{"seq":3,"seg":0,"ts":1764057600003,"kind":"model.request","prefix":1,"messages":[2],"params":{"model":"m","max_tokens":1024},"sha256":"cb5d26c8a0b5cc09bb347b42cc0d4b10c37c6f8bbcb3d2404568dd176d381ead"}
+{"seq":4,"seg":0,"ts":1764057600004,"kind":"model.response","body":{"id":"msg_1","type":"message","role":"assistant","content":[{"type":"thinking","thinking":"","signature":"sig"},{"type":"tool_use","id":"toolu_01","name":"edit","input":{"path":"a.css","z":1e5}}],"stop_reason":"tool_use","usage":{"input_tokens":10,"output_tokens":5}},"content":[60,196],"request_id":"req_1","usage":{"input_tokens":10,"output_tokens":5,"cache_creation_input_tokens":0,"cache_read_input_tokens":0}}
+{"seq":5,"seg":0,"ts":1764057600005,"kind":"message.assistant","from":4,"calls":[{"id":"toolu_01","name":"edit"}]}
+{"seq":6,"seg":0,"ts":1764057600006,"kind":"tool.start","call":"toolu_01","tool":"edit","effect":"write"}
+{"seq":7,"seg":0,"ts":1764057600007,"kind":"tool.result","call":"toolu_01","block":{"type":"tool_result","tool_use_id":"toolu_01","content":"ok é"},"is_error":false}
+{"seq":8,"seg":0,"ts":1764057600008,"kind":"model.request","prefix":1,"messages":[2,5,7],"params":{"model":"m","max_tokens":1024},"sha256":"7ad2de79d5cdc6bbdb4ecdb9b2cbb8bc8bd25651fe3ed26ea9329fe52c87f09e"}
+{"seq":9,"seg":0,"ts":1764057600009,"kind":"model.response","body":{"id":"msg_1","type":"message","role":"assistant","content":[{"type":"text","text":"Done."},{"type":"future_block","x":[1.0]}],"stop_reason":"end_turn","usage":{"input_tokens":10,"output_tokens":5}},"content":[60,126],"request_id":"req_1","usage":{"input_tokens":10,"output_tokens":5,"cache_creation_input_tokens":0,"cache_read_input_tokens":0}}
+{"seq":10,"seg":0,"ts":1764057600010,"kind":"message.assistant","from":9,"calls":[]}
+{"seq":11,"seg":0,"ts":1764057600011,"kind":"turn.end","outcome":"finished"}
+{"seq":12,"seg":0,"ts":1764057600012,"kind":"message.user","content":"two"}
+{"seq":13,"seg":0,"ts":1764057600013,"kind":"model.request","prefix":1,"messages":[2,5,7,10,12],"params":{"model":"m","max_tokens":1024},"sha256":"adab726173c7f08326afaf3137a727f9ab87574a957fdb9c728e7f639d4f542f"}
+{"seq":14,"seg":0,"ts":1764057600014,"kind":"model.response","body":{"id":"msg_1","type":"message","role":"assistant","content":[{"type":"thinking","thinking":"","signature":"sig"},{"type":"tool_use","id":"toolu_02","name":"edit","input":{"path":"a.css","z":1e5}}],"stop_reason":"tool_use","usage":{"input_tokens":10,"output_tokens":5}},"content":[60,196],"request_id":"req_1","usage":{"input_tokens":10,"output_tokens":5,"cache_creation_input_tokens":0,"cache_read_input_tokens":0}}
+{"seq":15,"seg":0,"ts":1764057600015,"kind":"message.assistant","from":14,"calls":[{"id":"toolu_02","name":"edit"}]}
+{"seq":16,"seg":0,"ts":1764057600016,"kind":"tool.start","call":"toolu_02","tool":"edit","effect":"write"}
+{"seq":17,"seg":0,"ts":1764057600017,"kind":"tool.result","call":"toolu_02","block":{"type":"tool_result","tool_use_id":"toolu_02","content":"ok é"},"is_error":false}
+{"seq":18,"seg":0,"ts":1764057600018,"kind":"model.request","prefix":1,"messages":[2,5,7,10,12,15,17],"params":{"model":"m","max_tokens":1024},"sha256":"8dda6d1be624b40805c4bd68a3fd5ba8e176a789f2aeaffb7b05296f6d28e686"}
+{"seq":19,"seg":0,"ts":1764057600019,"kind":"model.response","body":{"id":"msg_1","type":"message","role":"assistant","content":[{"type":"text","text":"Done."},{"type":"future_block","x":[1.0]}],"stop_reason":"end_turn","usage":{"input_tokens":10,"output_tokens":5}},"content":[60,126],"request_id":"req_1","usage":{"input_tokens":10,"output_tokens":5,"cache_creation_input_tokens":0,"cache_read_input_tokens":0}}
+{"seq":20,"seg":0,"ts":1764057600020,"kind":"message.assistant","from":19,"calls":[]}
+{"seq":21,"seg":0,"ts":1764057600021,"kind":"turn.end","outcome":"finished"}
