@@ -8,5 +8,28 @@ license.workspace = true
 repository.workspace = true
 publish.workspace = true
 
+[features]
+default = ["jsonl"]
+# The file store: one JSONL file per session. Off, the crate has the in-memory store only.
+jsonl = ["dep:tokio"]
+
+[dependencies]
+sarathi-protocol.workspace = true
+serde.workspace = true
+serde_json = { workspace = true, features = ["raw_value"] }
+sha2.workspace = true
+thiserror.workspace = true
+tokio = { workspace = true, optional = true, features = ["rt"] }
+uuid = { workspace = true, features = ["v7", "serde"] }
+
+[dev-dependencies]
+tempfile.workspace = true
+tokio = { workspace = true, features = ["rt", "rt-multi-thread", "macros"] }
+
+[[test]]
+name = "log"
+path = "tests/log/main.rs"
+required-features = ["jsonl"]
+
 [lints]
 workspace = true

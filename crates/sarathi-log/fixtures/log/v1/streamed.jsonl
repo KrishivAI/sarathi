@@ -1,0 +1,7 @@
+{"sarathi_log":1,"session":"01a20f64-ffb4-724b-ad6b-647e6c177147","created":1764057600000,"writer":"sarathi-log 0.0.0","forked_from":null}
+{"seq":1,"seg":0,"ts":1764057600001,"kind":"session.prefix","protocol":"anthropic-messages","system":[{"type":"text","text":"You edit themes.","cache_control":{"type":"ephemeral"}}],"tools":[{"name":"edit","input_schema":{"type":"object"}},{"name":"look","input_schema":{"type":"object"}}]}
+{"seq":2,"seg":0,"ts":1764057600002,"kind":"message.user","content":"hi"}
+{"seq":3,"seg":0,"ts":1764057600003,"kind":"model.request","prefix":1,"messages":[2],"params":{"model":"m","max_tokens":1024},"sha256":"669094880f8e4d2ca07274f87a4428907e81c49cc7422bedd85e5e5d949eeaff"}
+{"seq":4,"seg":0,"ts":1764057600004,"kind":"model.response","body":"{\n  \"id\": \"msg_2\",\n  \"content\": [{\"type\": \"text\", \"text\": \"h\\u00e9\"}],\n  \"stop_reason\": \"end_turn\"\n}","content":[32,69],"sse":"event: message_start\ndata: {\"type\":\"message_start\"}\n\n","request_id":"req_2","usage":{"input_tokens":3,"output_tokens":2,"cache_creation_input_tokens":0,"cache_read_input_tokens":0},"esc":["body"]}
+{"seq":5,"seg":0,"ts":1764057600005,"kind":"message.assistant","from":4,"calls":[]}
+{"seq":6,"seg":0,"ts":1764057600006,"kind":"turn.end","outcome":"finished"}

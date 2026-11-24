@@ -1,0 +1,490 @@
+// SPDX-License-Identifier: Apache-2.0
+//! [`Log`]: one session's entries in memory, the invariants every append keeps, the request projection and resume.
+
+use sarathi_protocol::{MessageSlice, RawJson, Role, Seq};
+use sha2::{Digest, Sha256};
+
+use crate::entry::{Body, CallRef, Effect, Entry, Header, Recipe};
+use crate::error::LogError;
+use crate::line::{content_slice, encode_entry};
+
+/// The text resume puts in the result of a side-effecting call that started before a crash and has no result.
+pub const CUT_SHORT: &str =
+    "The call was cut short by a restart. Its effect is unknown; check before running it again.";
+
+/// One session: its header and entries, in seq order. Every way of adding entries keeps the invariants checked by
+/// [`Log::append`], so a `Log` read from a store is one that store would have accepted.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Log {
+    header: Header,
+    entries: Vec<Entry>,
+}
+
+/// One message slice as a request carries it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Slice<'a> {
+    /// A user message (or steer): its `content`.
+    User {
+        /// The `content` value.
+        content: &'a RawJson,
+    },
+    /// An assistant message: the `content` of the response it came from, byte for byte.
+    Assistant {
+        /// The `content` value.
+        content: RawJson,
+        /// The client tool calls it asks for.
+        calls: &'a [CallRef],
+    },
+    /// One tool result block. The assembler groups consecutive results into one user message.
+    ToolResult {
+        /// The call it answers.
+        call: &'a str,
+        /// The block.
+        block: &'a RawJson,
+    },
+}
+
+impl Slice<'_> {
+    /// The slice as a whole message (`{"role":…,"content":…}`). A tool result is wrapped alone; an assembler that
+    /// groups results builds its own message instead.
+    ///
+    /// # Errors
+    /// Never for slices read from a valid log.
+    pub fn to_message(&self, seq: Seq) -> Result<MessageSlice, sarathi_protocol::RawJsonError> {
+        match self {
+            Slice::User { content } => MessageSlice::new(seq, Role::User, content),
+            Slice::Assistant { content, .. } => MessageSlice::new(seq, Role::Assistant, content),
+            Slice::ToolResult { block, .. } => {
+                let content = RawJson::from_string(format!("[{}]", block.as_str()))?;
+                MessageSlice::new(seq, Role::User, &content)
+            }
+        }
+    }
+}
+
+/// Everything a request is built from, resolved from a [`Recipe`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RequestParts<'a> {
+    /// The provider protocol of the prefix.
+    pub protocol: &'a str,
+    /// `system` as sent.
+    pub system: &'a RawJson,
+    /// `tools` as sent.
+    pub tools: &'a RawJson,
+    /// The slices, in order, with their seqs.
+    pub messages: Vec<(Seq, Slice<'a>)>,
+    /// The per-call parameters.
+    pub params: &'a RawJson,
+}
+
+/// What the next request sends: the current segment's prefix and slices.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Projection {
+    /// The current segment.
+    pub segment: u32,
+    /// The `session.prefix` entry in force, if one was written.
+    pub prefix: Option<Seq>,
+    /// The slices: the segment's seed, then the segment's own slices, in seq order.
+    pub messages: Vec<Seq>,
+}
+
+/// Where a tool call of the last assistant message stands.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum CallStatus {
+    /// Asked for, never started: may run.
+    NotStarted,
+    /// A read-only call started and has no result: run it again.
+    StartedRead,
+    /// A side-effecting call started and has no result: never run again; answer it with [`CUT_SHORT`].
+    StartedWrite,
+    /// Answered.
+    Done,
+}
+
+/// One call of the last assistant message.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OpenCall {
+    /// The call.
+    pub call: CallRef,
+    /// Where it stands.
+    pub status: CallStatus,
+}
+
+/// The state a run continues from after a restart.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResumeState {
+    /// The next seq to append.
+    pub next: Seq,
+    /// The current segment.
+    pub segment: u32,
+    /// A user message started a turn that has no `turn.end` yet.
+    pub in_turn: bool,
+    /// The calls of the last assistant message, if the turn is still open.
+    pub calls: Vec<OpenCall>,
+    /// A `model.request` with no accepted answer and no failure: make the call again.
+    pub pending_model: Option<Seq>,
+}
+
+impl ResumeState {
+    /// No call is waiting for a result and no model call is in flight: a fork or a new user message may follow.
+    pub fn at_boundary(&self) -> bool {
+        self.pending_model.is_none() && self.calls.iter().all(|c| c.status == CallStatus::Done)
+    }
+}
+
+impl Log {
+    /// An empty session.
+    pub fn new(header: Header) -> Self {
+        Log {
+            header,
+            entries: Vec::new(),
+        }
+    }
+
+    /// The header.
+    pub fn header(&self) -> &Header {
+        &self.header
+    }
+
+    /// The entries, from seq 1.
+    pub fn entries(&self) -> &[Entry] {
+        &self.entries
+    }
+
+    /// The seq the next entry gets.
+    pub fn next_seq(&self) -> Seq {
+        Seq(self.entries.len() as u64 + 1)
+    }
+
+    /// The current segment.
+    pub fn segment(&self) -> u32 {
+        self.entries.last().map_or(0, |e| e.seg)
+    }
+
+    /// The entry at `seq`.
+    pub fn get(&self, seq: Seq) -> Option<&Entry> {
+        let i = usize::try_from(seq.0).ok()?.checked_sub(1)?;
+        self.entries.get(i)
+    }
+
+    /// Appends `entries` if the next seq is `expected` and every entry keeps the log's invariants; all or none.
+    ///
+    /// Invariants: seqs are dense; an entry stays in the current segment, except a `segment.start`, which opens the
+    /// next one; references (`from`, `seed`, a recipe's `prefix` and `messages`) point back to entries of the right
+    /// kind; a `segment.start`'s `replaces` lies before it.
+    ///
+    /// # Errors
+    /// [`LogError::Conflict`] if `expected` is not the next seq; [`LogError::Invalid`] for a broken invariant.
+    pub fn append(&mut self, expected: Seq, entries: Vec<Entry>) -> Result<Seq, LogError> {
+        let next = self.next_seq();
+        if expected != next {
+            return Err(LogError::Conflict {
+                expected: expected.0,
+                actual: next.0,
+            });
+        }
+        let len = self.entries.len();
+        for e in entries {
+            if let Err(err) = self.check(&e) {
+                self.entries.truncate(len);
+                return Err(err);
+            }
+            self.entries.push(e);
+        }
+        Ok(self.next_seq())
+    }
+
+    #[cfg(feature = "jsonl")]
+    pub(crate) fn truncate_to(&mut self, len: usize) {
+        self.entries.truncate(len);
+    }
+
+    fn check(&self, e: &Entry) -> Result<(), LogError> {
+        let invalid = |detail: String| LogError::Invalid { seq: e.seq, detail };
+        if e.seq != self.next_seq() {
+            return Err(invalid(format!("expected seq {}", self.next_seq().0)));
+        }
+        let seg = self.segment();
+        match &e.body {
+            Body::SegmentStart { seed, replaces, .. } => {
+                if e.seg != seg + 1 {
+                    return Err(invalid(format!(
+                        "segment.start must open segment {}",
+                        seg + 1
+                    )));
+                }
+                for s in seed {
+                    self.expect_slice(*s).map_err(invalid)?;
+                }
+                if let Some(r) = replaces
+                    && (r.start > r.end || r.end > e.seq)
+                {
+                    return Err(invalid("`replaces` must lie before the entry".into()));
+                }
+            }
+            _ if e.seg != seg => {
+                return Err(invalid(format!("entry must stay in segment {seg}")));
+            }
+            Body::AssistantMessage { from, .. } => match self.get(*from).map(|f| &f.body) {
+                Some(Body::ModelResponse { .. }) => {}
+                _ => {
+                    return Err(invalid(format!(
+                        "`from` {} is not a model.response",
+                        from.0
+                    )));
+                }
+            },
+            Body::ModelRequest { recipe, sha256 } => {
+                match self.get(recipe.prefix).map(|p| &p.body) {
+                    Some(Body::SessionPrefix { .. }) => {}
+                    _ => {
+                        return Err(invalid(format!(
+                            "`prefix` {} is not a session.prefix",
+                            recipe.prefix.0
+                        )));
+                    }
+                }
+                for s in &recipe.messages {
+                    self.expect_slice(*s).map_err(invalid)?;
+                }
+                if sha256.len() != 64 || !sha256.bytes().all(|b| b.is_ascii_hexdigit()) {
+                    return Err(invalid("`sha256` is not 64 hex digits".into()));
+                }
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+
+    fn expect_slice(&self, seq: Seq) -> Result<(), String> {
+        match self.get(seq) {
+            Some(e) if e.body.is_slice() => Ok(()),
+            _ => Err(format!("seq {} is not a message slice", seq.0)),
+        }
+    }
+
+    /// The slice an entry holds.
+    ///
+    /// # Errors
+    /// [`LogError::Invalid`] if `seq` is not a slice entry.
+    pub fn slice(&self, seq: Seq) -> Result<Slice<'_>, LogError> {
+        let not = |what: &str| LogError::Invalid {
+            seq,
+            detail: what.to_owned(),
+        };
+        match self.get(seq).map(|e| &e.body) {
+            Some(Body::UserMessage { content, .. }) => Ok(Slice::User { content }),
+            Some(Body::ToolResult { call, block, .. }) => Ok(Slice::ToolResult { call, block }),
+            Some(Body::AssistantMessage { from, calls }) => {
+                match self.get(*from).map(|e| &e.body) {
+                    Some(Body::ModelResponse { body, content, .. }) => Ok(Slice::Assistant {
+                        content: content_slice(body, content)
+                            .ok_or_else(|| not("the response's content range is not a value"))?,
+                        calls,
+                    }),
+                    _ => Err(not("`from` is not a model.response")),
+                }
+            }
+            _ => Err(not("not a message slice")),
+        }
+    }
+
+    /// The current segment's prefix and slices: what the next request sends.
+    pub fn projection(&self) -> Projection {
+        let segment = self.segment();
+        let mut messages = Vec::new();
+        let mut prefix = None;
+        for e in &self.entries {
+            if let Body::SessionPrefix { .. } = e.body {
+                prefix = Some(e.seq);
+            }
+            if e.seg != segment {
+                continue;
+            }
+            match &e.body {
+                Body::SegmentStart { seed, .. } => messages.extend_from_slice(seed),
+                b if b.is_slice() => messages.push(e.seq),
+                _ => {}
+            }
+        }
+        Projection {
+            segment,
+            prefix,
+            messages,
+        }
+    }
+
+    /// The recipe of the next request: the projection with `params`.
+    ///
+    /// # Errors
+    /// [`LogError::Invalid`] if no `session.prefix` was written.
+    pub fn next_recipe(&self, params: RawJson) -> Result<Recipe, LogError> {
+        let p = self.projection();
+        let prefix = p.prefix.ok_or_else(|| LogError::Invalid {
+            seq: self.next_seq(),
+            detail: "no session.prefix before the first request".into(),
+        })?;
+        Ok(Recipe {
+            prefix,
+            messages: p.messages,
+            params,
+        })
+    }
+
+    /// Resolves a recipe to the parts an assembler writes a body from.
+    ///
+    /// # Errors
+    /// [`LogError::Invalid`] if the recipe points at entries of the wrong kind.
+    pub fn request_parts<'a>(&'a self, recipe: &'a Recipe) -> Result<RequestParts<'a>, LogError> {
+        let Some(Body::SessionPrefix {
+            protocol,
+            system,
+            tools,
+        }) = self.get(recipe.prefix).map(|e| &e.body)
+        else {
+            return Err(LogError::Invalid {
+                seq: recipe.prefix,
+                detail: "not a session.prefix".into(),
+            });
+        };
+        let messages = recipe
+            .messages
+            .iter()
+            .map(|s| self.slice(*s).map(|sl| (*s, sl)))
+            .collect::<Result<_, _>>()?;
+        Ok(RequestParts {
+            protocol,
+            system,
+            tools,
+            messages,
+            params: &recipe.params,
+        })
+    }
+
+    /// Checks that every `model.request` rebuilds, through `assemble`, to the body hash it records.
+    ///
+    /// # Errors
+    /// [`LogError::HashMismatch`] for the first request that does not.
+    pub fn verify_requests(
+        &self,
+        assemble: &dyn Fn(&RequestParts<'_>) -> Vec<u8>,
+    ) -> Result<(), LogError> {
+        for e in &self.entries {
+            if let Body::ModelRequest { recipe, sha256 } = &e.body {
+                let actual = sha256_hex(&assemble(&self.request_parts(recipe)?));
+                if &actual != sha256 {
+                    return Err(LogError::HashMismatch {
+                        seq: e.seq,
+                        recorded: sha256.clone(),
+                        actual,
+                    });
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Where a run stands: what a restarted core must do before its next model call.
+    pub fn resume(&self) -> ResumeState {
+        let mut in_turn = false;
+        let mut calls: Vec<OpenCall> = Vec::new();
+        let mut last_request: Option<Seq> = None;
+        let mut answered = false;
+        for e in &self.entries {
+            match &e.body {
+                Body::UserMessage { steer: false, .. } => in_turn = true,
+                Body::TurnEnd { .. } => {
+                    in_turn = false;
+                    calls.clear();
+                }
+                Body::ModelRequest { .. } => {
+                    last_request = Some(e.seq);
+                    answered = false;
+                }
+                Body::ModelFailure { .. } => answered = true,
+                Body::AssistantMessage { from, calls: asked } => {
+                    if last_request.is_some_and(|r| *from > r) {
+                        answered = true;
+                    }
+                    calls = asked
+                        .iter()
+                        .map(|c| OpenCall {
+                            call: c.clone(),
+                            status: CallStatus::NotStarted,
+                        })
+                        .collect();
+                }
+                Body::ToolStart { call, effect, .. } => {
+                    if let Some(c) = calls.iter_mut().find(|c| *c.call.id == **call)
+                        && c.status == CallStatus::NotStarted
+                    {
+                        c.status = match effect {
+                            Effect::Read => CallStatus::StartedRead,
+                            Effect::Write => CallStatus::StartedWrite,
+                        };
+                    }
+                }
+                Body::ToolResult { call, .. } => {
+                    if let Some(c) = calls.iter_mut().find(|c| *c.call.id == **call) {
+                        c.status = CallStatus::Done;
+                    }
+                }
+                _ => {}
+            }
+        }
+        ResumeState {
+            next: self.next_seq(),
+            segment: self.segment(),
+            in_turn,
+            calls,
+            pending_model: last_request.filter(|_| !answered),
+        }
+    }
+
+    /// The log as it was after `at`: the header and entries `1..=at`.
+    ///
+    /// # Errors
+    /// [`LogError::Invalid`] if `at` is past the end.
+    pub fn up_to(&self, at: Seq) -> Result<Log, LogError> {
+        let n = usize::try_from(at.0).unwrap_or(usize::MAX);
+        if n > self.entries.len() {
+            return Err(LogError::Invalid {
+                seq: at,
+                detail: "past the end of the log".into(),
+            });
+        }
+        Ok(Log {
+            header: self.header.clone(),
+            entries: self.entries[..n].to_vec(),
+        })
+    }
+
+    /// Lower-case hex SHA-256 of the entry lines `1..=at`, each with its `\n`, as the JSONL store writes them.
+    ///
+    /// # Errors
+    /// [`LogError::Invalid`] if `at` is past the end.
+    pub fn lines_sha256(&self, at: Seq) -> Result<String, LogError> {
+        let part = self.up_to(at)?;
+        let mut h = Sha256::new();
+        for e in &part.entries {
+            h.update(encode_entry(e)?.as_bytes());
+            h.update(b"\n");
+        }
+        Ok(hex(&h.finalize()))
+    }
+}
+
+/// Lower-case hex SHA-256 of `bytes`.
+pub fn sha256_hex(bytes: &[u8]) -> String {
+    hex(&Sha256::digest(bytes))
+}
+
+fn hex(bytes: &[u8]) -> String {
+    const DIGITS: &[u8; 16] = b"0123456789abcdef";
+    let mut s = String::with_capacity(bytes.len() * 2);
+    for b in bytes {
+        s.push(char::from(DIGITS[usize::from(b >> 4)]));
+        s.push(char::from(DIGITS[usize::from(b & 0xf)]));
+    }
+    s
+}
