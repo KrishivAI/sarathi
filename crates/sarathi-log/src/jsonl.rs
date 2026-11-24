@@ -109,7 +109,7 @@ impl Inner {
     }
 
     fn create(&self, created: u64, forked_from: Option<ForkedFrom>) -> Result<Header, LogError> {
-        let header = Header::new(SessionId::new(), created, forked_from);
+        let header = Header::new(crate::new_session_id(), created, forked_from);
         let dir = self.dir(header.session);
         std::fs::create_dir_all(&self.root)?;
         std::fs::create_dir(&dir)?;

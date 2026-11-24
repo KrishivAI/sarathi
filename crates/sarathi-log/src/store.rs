@@ -85,7 +85,7 @@ impl LogStore for MemoryStore {
         created: u64,
         forked_from: Option<ForkedFrom>,
     ) -> Result<Header, LogError> {
-        let header = Header::new(SessionId::new(), created, forked_from);
+        let header = Header::new(crate::new_session_id(), created, forked_from);
         let mut map = self.sessions.lock().unwrap_or_else(PoisonError::into_inner);
         map.insert(header.session, Log::new(header.clone()));
         Ok(header)

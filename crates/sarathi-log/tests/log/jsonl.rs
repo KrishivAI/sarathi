@@ -136,7 +136,7 @@ async fn unknown_sessions_and_newer_formats_are_refused() {
     let root = tempfile::tempdir().unwrap();
     let store = JsonlStore::new(root.path());
     assert!(matches!(
-        store.load(SessionId::new()).await,
+        store.load(sarathi_log::new_session_id()).await,
         Err(LogError::NotFound(_))
     ));
     let (id, _) = written(root.path()).await;
@@ -149,11 +149,12 @@ async fn unknown_sessions_and_newer_formats_are_refused() {
     .unwrap();
     assert!(matches!(
         JsonlStore::new(root.path()).load(id).await,
-        Err(LogError::NewerFormat {
-            found: 2,
-            supported: 1,
-            ..
-        })
+        Err(LogError::Format(
+            sarathi_protocol::log::VersionError::NewerFormat {
+                found: 2,
+                supported: 1,
+            }
+        ))
     ));
 }
 
