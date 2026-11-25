@@ -59,12 +59,31 @@ impl Compactor {
             Compactor::ClientSummary => Strategy::ClientSummary,
         }
     }
+
+    /// The beta flag its compaction call needs, if any.
+    pub fn beta(self) -> Option<&'static str> {
+        match self {
+            Compactor::Server => Some(COMPACTION_BETA),
+            Compactor::ClientSummary => None,
+        }
+    }
+
+    fn of(strategy: Strategy) -> Option<Compactor> {
+        match strategy {
+            Strategy::Server => Some(Compactor::Server),
+            Strategy::ClientSummary => Some(Compactor::ClientSummary),
+            _ => None,
+        }
+    }
 }
 
-/// A compaction call to make: append [`entries`](Self::entries) at [`Log::next_seq`], then render
-/// [`recipe`](Self::recipe), log it as a `model.request` and make the call.
+/// A compaction call to make: render [`recipe`](Self::recipe), append [`entries`](Self::entries) and
+/// [`model_request`](Self::model_request) in one batch at [`Log::next_seq`], then make the call. The request is marked
+/// as a compaction call, so its answer can only become a seed ([`compaction_seed`]).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CompactionRequest {
+    /// Who summarizes.
+    pub compactor: Compactor,
     /// Entries to append before the request (a client summary's prompt), possibly none.
     pub entries: Vec<Entry>,
     /// The request.
@@ -73,14 +92,29 @@ pub struct CompactionRequest {
     pub beta: Option<&'static str>,
 }
 
+impl CompactionRequest {
+    /// The `model.request` body to log for this call, with the SHA-256 of the body as sent.
+    pub fn model_request(&self, sha256: String) -> Body {
+        Body::ModelRequest {
+            recipe: self.recipe.clone(),
+            sha256,
+            compaction: Some(self.compactor.strategy()),
+        }
+    }
+}
+
 /// The compaction call for the log as it stands, with the turn's `params` (same model and settings as a turn).
 ///
 /// For [`Compactor::Server`], `params` gets a `compaction` member (`{"type":"summarize"}`, with `instructions` if
 /// given); for [`Compactor::ClientSummary`], a `segment.seed` user message with [`SUMMARY_PROMPT`] is appended and
-/// sent last. `instructions` are for the server only and ignored by the client summary.
+/// sent last. `instructions` are for the server only and ignored by the client summary; an empty one is none.
+///
+/// A server compaction runs only between turns: its block must be followed by the next user message. A client
+/// summary may also run inside a turn (after a tool round): the model continues from the summary.
 ///
 /// # Errors
-/// [`ContextError::NotAtBoundary`] if a tool call has no result or a model call is in flight;
+/// [`ContextError::NotAtBoundary`] if a tool call has no result or a model call is in flight, or, for the server, a
+/// turn is open;
 /// [`ContextError::BadParams`] if `params` is not a JSON object or already has a `compaction` member;
 /// [`ContextError::InstructionsTooLong`] past [`MAX_INSTRUCTIONS`]; [`ContextError::Log`] if no `session.prefix` was
 /// written.
@@ -91,13 +125,14 @@ pub fn compaction_request(
     instructions: Option<&str>,
     ts: u64,
 ) -> Result<CompactionRequest, ContextError> {
-    if !log.resume().at_boundary() {
+    let resume = log.resume();
+    if !resume.at_boundary() || (compactor == Compactor::Server && resume.in_turn) {
         return Err(ContextError::NotAtBoundary);
     }
     match compactor {
         Compactor::Server => {
             let mut member = String::from(r#"{"type":"summarize""#);
-            if let Some(i) = instructions {
+            if let Some(i) = instructions.filter(|i| !i.is_empty()) {
                 let chars = i.chars().count();
                 if chars > MAX_INSTRUCTIONS {
                     return Err(ContextError::InstructionsTooLong(chars));
@@ -108,9 +143,10 @@ pub fn compaction_request(
             member.push('}');
             let params = with_member(params, "compaction", &member)?;
             Ok(CompactionRequest {
+                compactor,
                 entries: Vec::new(),
                 recipe: log.next_recipe(params)?,
-                beta: Some(COMPACTION_BETA),
+                beta: compactor.beta(),
             })
         }
         Compactor::ClientSummary => {
@@ -129,9 +165,10 @@ pub fn compaction_request(
             let mut recipe = log.next_recipe(params.clone())?;
             recipe.messages.push(seq);
             Ok(CompactionRequest {
+                compactor,
                 entries: vec![prompt],
                 recipe,
-                beta: None,
+                beta: compactor.beta(),
             })
         }
     }
@@ -166,29 +203,23 @@ pub fn pending_compaction(log: &Log) -> Option<PendingCompaction> {
     })
 }
 
-/// Which compactor a `model.request` asked, if it is a compaction call: a server call has a `compaction` member in
-/// its params; a client summary sends last a `segment.seed` of its own segment (seed slices of a `segment.start`
-/// belong to the segment before it, so only a summary prompt is one).
+/// Which compactor a `model.request` asked, if it is a compaction call (its `compaction` field).
 pub(crate) fn compactor_of(log: &Log, request: Seq) -> Option<Compactor> {
-    let req = log.get(request)?;
-    let Body::ModelRequest { recipe, .. } = &req.body else {
-        return None;
-    };
-    if serde_json::from_str::<BTreeMap<String, &RawValue>>(recipe.params.as_str())
-        .is_ok_and(|m| m.contains_key("compaction"))
-    {
-        return Some(Compactor::Server);
+    match log.get(request).map(|e| &e.body) {
+        Some(Body::ModelRequest {
+            compaction: Some(c),
+            ..
+        }) => Compactor::of(*c),
+        _ => None,
     }
-    let last = log.get(*recipe.messages.last()?)?;
-    (last.seg == req.seg && matches!(last.body, Body::SegmentSeed { .. }))
-        .then_some(Compactor::ClientSummary)
 }
 
 /// The new segment made from the pending compaction call's answer ([`pending_compaction`]).
 ///
 /// Server: the seed is a `segment.seed` assistant slice holding the response's `content` byte for byte, which must be
-/// exactly one non-empty `compaction` block. Client summary: the seed is a `segment.seed` user message,
-/// [`SUMMARY_PREFIX`] and the answer's text. Either way `replaces` covers the old segment, and the `segment.start`
+/// exactly one `compaction` block with non-empty `content` and `signature`. Client summary: the seed is a
+/// `segment.seed` user message, [`SUMMARY_PREFIX`] and the answer's text; an answer that was cut short, refused or
+/// asks for a tool is no summary. Either way `replaces` covers the old segment, and the `segment.start`
 /// answers the request. Append the entries in one batch at [`Log::next_seq`].
 ///
 /// # Errors
@@ -212,7 +243,9 @@ pub fn compaction_seed(log: &Log, ts: u64) -> Result<Seed, ContextError> {
         }
         Compactor::ClientSummary => {
             let text = text_of(&blocks);
-            if text.trim().is_empty() {
+            let cut = stop_of(body).is_some_and(|r| NOT_A_SUMMARY.contains(&r.as_str()));
+            if cut || text.trim().is_empty() || block_types(&blocks).iter().any(|t| t == "tool_use")
+            {
                 return Err(failed(body));
             }
             (
@@ -269,16 +302,42 @@ pub fn carries_compaction_block(log: &Log) -> bool {
     })
 }
 
-fn failed(body: &RawJson) -> ContextError {
+/// Stop reasons of an answer that is no complete summary: cut short, refused or asking for a tool (Anthropic
+/// `stop_reason`, OpenAI `finish_reason`).
+const NOT_A_SUMMARY: &[&str] = &[
+    "max_tokens",
+    "model_context_window_exceeded",
+    "refusal",
+    "tool_use",
+    "pause_turn",
+    "length",
+    "content_filter",
+    "tool_calls",
+    "function_call",
+];
+
+/// The answer's stop reason: Anthropic `stop_reason`, or the first OpenAI choice's `finish_reason`.
+fn stop_of(body: &RawJson) -> Option<String> {
+    #[derive(Deserialize)]
+    struct Choice {
+        #[serde(default)]
+        finish_reason: Option<String>,
+    }
     #[derive(Deserialize)]
     struct Stop {
         #[serde(default)]
         stop_reason: Option<String>,
+        #[serde(default)]
+        choices: Vec<Choice>,
     }
+    let s = serde_json::from_str::<Stop>(body.as_str()).ok()?;
+    s.stop_reason
+        .or_else(|| s.choices.into_iter().next().and_then(|c| c.finish_reason))
+}
+
+fn failed(body: &RawJson) -> ContextError {
     ContextError::CompactionFailed {
-        stop_reason: serde_json::from_str::<Stop>(body.as_str())
-            .ok()
-            .and_then(|s| s.stop_reason),
+        stop_reason: stop_of(body),
     }
 }
 
@@ -308,6 +367,8 @@ struct CompactionBlock<'a> {
     kind: Option<std::borrow::Cow<'a, str>>,
     #[serde(borrow, default)]
     content: Option<std::borrow::Cow<'a, str>>,
+    #[serde(borrow, default)]
+    signature: Option<std::borrow::Cow<'a, str>>,
 }
 
 fn block_types(content: &RawJson) -> Vec<String> {
@@ -320,12 +381,13 @@ fn block_types(content: &RawJson) -> Vec<String> {
         .unwrap_or_default()
 }
 
-/// Exactly one block, a `compaction` block with non-empty `content` text.
+/// Exactly one block, a `compaction` block with non-empty `content` text and `signature`.
 fn is_compaction_block_list(content: &RawJson) -> bool {
     matches!(
         serde_json::from_str::<Vec<CompactionBlock<'_>>>(content.as_str()).as_deref(),
         Ok([b]) if b.kind.as_deref() == Some("compaction")
             && b.content.as_deref().is_some_and(|c| !c.trim().is_empty())
+            && b.signature.as_deref().is_some_and(|g| !g.is_empty())
     )
 }
 
@@ -351,7 +413,9 @@ fn with_member(params: &RawJson, name: &str, value: &str) -> Result<RawJson, Con
     let members = serde_json::from_str::<BTreeMap<String, &RawValue>>(params.as_str())
         .map_err(|_| bad("not a JSON object"))?;
     if members.contains_key(name) {
-        return Err(bad("already has a `compaction` member"));
+        return Err(ContextError::BadParams(format!(
+            "already has a `{name}` member"
+        )));
     }
     let text = params.as_str().trim_end();
     let body = text
@@ -397,10 +461,12 @@ mod tests {
             r#"[{"type":"compaction","content":"sum","signature":"s"}]"#
         )));
         for no in [
-            r#"[{"type":"compaction","content":""}]"#,
-            r#"[{"type":"compaction","content":null}]"#,
+            r#"[{"type":"compaction","content":"","signature":"s"}]"#,
+            r#"[{"type":"compaction","content":null,"signature":"s"}]"#,
+            r#"[{"type":"compaction","content":"a"}]"#,
+            r#"[{"type":"compaction","content":"a","signature":""}]"#,
             r#"[{"type":"text","text":"hi"}]"#,
-            r#"[{"type":"compaction","content":"a"},{"type":"text","text":"b"}]"#,
+            r#"[{"type":"compaction","content":"a","signature":"s"},{"type":"text","text":"b"}]"#,
             "[]",
             r#""text""#,
         ] {
