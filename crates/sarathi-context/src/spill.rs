@@ -82,6 +82,10 @@ pub struct Spilled {
 
 /// Where spilled output lives. Writes are durable when `put` returns, so a `tool.result` written after it always
 /// names output that can be read.
+///
+/// Output is keyed by session and call id, so a call id must be unique within a session. Provider tool-use ids and
+/// the JSON step's ids are. A repeated id replaces the earlier output, and the earlier `tool.result`'s hash then no
+/// longer matches it ([`verify_spill`] reports that).
 pub trait SpillStore: Send + Sync {
     /// Stores the output of `call` in `session`. Storing the same call again replaces it.
     fn put(
@@ -110,6 +114,7 @@ pub trait SpillStore: Send + Sync {
 
 /// Spills `output` of `call` if it is longer than [`SpillLimits::spill_bytes`]: stores it, then returns the record
 /// and the preview. `None`: the output goes into the result block as it is.
+/// `call` must be unique within the session (see [`SpillStore`]).
 ///
 /// # Errors
 /// [`ContextError::BadCallId`] for a call id that cannot name a file; the store's errors.
