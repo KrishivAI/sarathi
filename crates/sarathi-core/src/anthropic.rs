@@ -118,26 +118,49 @@ impl ModelCaller for AnthropicCaller {
                 .await
             {
                 Ok(answered) => received(answered.value),
-                Err(failed) => {
-                    let retries =
-                        u32::try_from(failed.attempts.len().saturating_sub(1)).unwrap_or(u32::MAX);
-                    let e = failed.into_error();
-                    Err(CallFailure {
-                        kind: kind_of(e.kind),
-                        detail: e.message.into(),
-                        status: e.status,
-                        request_id: None,
-                        retries,
-                    })
-                }
+                Err(failed) => Err(chain_failure(failed)),
             }
         })
+    }
+
+    /// `POST /v1/messages/count_tokens` through the chain, with the request [`ModelCaller::prepare`] builds (the same
+    /// betas, so the same history check). A failure goes back to the driver, which uses its estimate instead.
+    fn count_tokens(
+        &self,
+        parts: &RequestParts<'_>,
+    ) -> Option<BoxFuture<'_, Result<u64, CallFailure>>> {
+        let prepared = self.prepare(parts);
+        Some(Box::pin(async move {
+            let (_, request) = prepared?;
+            let request = &request;
+            match self
+                .chain
+                .run(|slot, _| async move { slot.client.count_tokens(request).await })
+                .await
+            {
+                Ok(answered) => Ok(answered.value.input_tokens),
+                Err(failed) => Err(chain_failure(failed)),
+            }
+        }))
     }
 
     fn read(&self, body: &RawJson, content: Range<u32>) -> Result<Received, CallFailure> {
         let mut r = answer(body)?;
         r.content = content;
         Ok(r)
+    }
+}
+
+/// A call the chain gave up on, as the driver's failure: the last attempt's error, and the retries before it.
+fn chain_failure(failed: sarathi_provider::resilience::Failed) -> CallFailure {
+    let retries = u32::try_from(failed.attempts.len().saturating_sub(1)).unwrap_or(u32::MAX);
+    let e = failed.into_error();
+    CallFailure {
+        kind: kind_of(e.kind),
+        detail: e.message.into(),
+        status: e.status,
+        request_id: None,
+        retries,
     }
 }
 
