@@ -27,8 +27,5 @@ reads N and N-1. Version 1 is the first of each, so no N-1 exists yet; the rules
 - One pretty-printed JSON object per run: `brief`, `arm` (unique name, e.g. `new-strong`), `slot` (the slot the arm
   filled), `model` (the concrete id; the price key), `run`, `accepted`, `valid_ops`, `total_ops`, `usage`, `steps`,
   `wall_ms`, `error`.
-- **No version field yet and unknown fields are ignored.** `slot` was added after the first draft and is
-  `#[serde(default)]` (empty when absent), so records written before it still load. The next field change must add a
-  `version` field first, with the same N and N-1 rule as the other two formats; until then a record is only valid
-  together with the crate version that wrote it.
-- Components of the path (`arm`, `brief`) are checked to be plain names before anything is written.
+- **Versioned from the start of this change:** `version` (1, `RUN_RECORD_VERSION`) and `purpose` (`tune` | `measure`) are required fields; the path is `<root>/<date>/<purpose>/<arm>/<brief>/<run>.json`. Unknown fields are still ignored, so the next field change bumps `version`. `slot` is `#[serde(default)]` (empty when absent). A tuning pass and the measurement never share a directory, `arm_stats` refuses a mix of purposes, and the kill line fails on stats that are not from a measurement pass.
+- Components of the path (`date`, `arm`, `brief`) are checked to be plain names before anything is written.

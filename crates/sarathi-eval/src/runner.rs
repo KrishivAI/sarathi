@@ -8,7 +8,8 @@ use std::path::{Path, PathBuf};
 use serde::Serialize;
 
 use crate::brief::{Brief, Split};
-use crate::metrics::{RunRecord, TokenUsage};
+pub use crate::metrics::Purpose;
+use crate::metrics::{RUN_RECORD_VERSION, RunRecord, TokenUsage};
 
 /// What a harness reports for one run of one brief.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -85,15 +86,6 @@ pub struct Arm<'a> {
     pub model: String,
     /// The harness.
     pub harness: &'a dyn Harness,
-}
-
-/// Why briefs are being run. A tuning pass never touches the measurement split.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Purpose {
-    /// Developing against the tuning split.
-    Tune,
-    /// The measurement that decides the kill line.
-    Measure,
 }
 
 /// The runner refused a plan.
@@ -216,6 +208,8 @@ pub fn run_briefs(
     for p in plan(briefs, arms.len(), k) {
         let (brief, arm) = (&briefs[p.brief], &arms[p.arm]);
         let mut rec = RunRecord {
+            version: RUN_RECORD_VERSION,
+            purpose,
             brief: brief.id.clone(),
             arm: arm.name.clone(),
             slot: arm.slot.clone(),
@@ -265,10 +259,12 @@ fn check_component(what: &str, id: &str) -> Result<(), RunnerError> {
     Ok(())
 }
 
-/// Where a record is written: `<root>/<date>/<arm>/<brief>/<run>.json`.
+/// Where a record is written: `<root>/<date>/<purpose>/<arm>/<brief>/<run>.json`, so a tuning pass and the
+/// measurement never share a directory.
 #[must_use]
 pub fn record_path(root: &Path, date: &str, r: &RunRecord) -> PathBuf {
     root.join(date)
+        .join(r.purpose.dir())
         .join(&r.arm)
         .join(&r.brief)
         .join(format!("{}.json", r.run))
@@ -491,6 +487,8 @@ mod tests {
     #[test]
     fn write_records_refuses_a_date_or_loaded_ids_that_leave_the_directory() {
         let r = |arm: &str, brief: &str| RunRecord {
+            version: RUN_RECORD_VERSION,
+            purpose: Purpose::Measure,
             brief: brief.into(),
             arm: arm.into(),
             slot: String::new(),
@@ -527,6 +525,8 @@ mod tests {
     #[test]
     fn record_path_layout() {
         let r = RunRecord {
+            version: RUN_RECORD_VERSION,
+            purpose: Purpose::Tune,
             brief: "b1".into(),
             arm: "old".into(),
             slot: String::new(),
@@ -542,7 +542,7 @@ mod tests {
         };
         assert_eq!(
             record_path(Path::new("runs"), "2026-11-28", &r),
-            Path::new("runs/2026-11-28/old/b1/2.json")
+            Path::new("runs/2026-11-28/tune/old/b1/2.json")
         );
     }
 }
