@@ -26,6 +26,8 @@ harness per slot, harnesses `old` and `new`, and one model per slot with its pri
 | `fallback-no-tools` | `gemini-2.5-flash` | no (JSON step protocol) | $20 |
 
 The total cap is $210. A cap covers every pass on its slot (the smoke run, tuning rounds and the measurement), so a
-later pass is run with the earlier records counted. A slot that reaches its cap stops: its remaining runs are not made,
-and the arm is reported as incomplete. Keys get provider-side limits at or below their slot's cap as the hard stop.
+later pass is run with the earlier records counted. The cap is checked once per group (one brief and repetition on
+one slot, both harnesses), so a slot overshoots by at most one group and its two harnesses always ran the same briefs.
+A slot that reaches its cap stops: its remaining groups are not run, the report lists it as incomplete, and the kill
+line fails on a stopped strong slot. Keys get provider-side limits at or below their slot's cap as the hard stop.
 The prices are checked against the providers' pages on the run day (`prices_checked` records where they came from).

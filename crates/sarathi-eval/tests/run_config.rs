@@ -163,7 +163,8 @@ fn arm<'a>(c: &RunConfig, harness: &str, slot: &str, h: &'a dyn Harness) -> Arm<
 #[test]
 fn a_slot_stops_at_its_cap_and_the_others_run_on() {
     let mut c = RunConfig::from_json(A9).unwrap();
-    // $2 per run on `strong` against a $5 cap: three runs (the third crosses it), then the slot stops.
+    // $2 per run on `strong`, two harnesses: a group (one brief, one repetition) costs $4 against a $5 cap. The first
+    // group leaves $4 spent, below the cap, so the second runs whole and crosses it; then the slot stops.
     c.slots[0].cap_usd = 5;
     let h = Spender;
     let arms = [
@@ -175,8 +176,8 @@ fn a_slot_stops_at_its_cap_and_the_others_run_on() {
     let out = run_within_caps(&c, &bs, &arms, &Always, Purpose::Measure, &[]).unwrap();
     let strong = out.records.iter().filter(|r| r.slot == "strong").count();
     assert_eq!(
-        strong, 3,
-        "runs while spend is below the cap, so one run may cross it"
+        strong, 4,
+        "groups run while spend is below the cap, so one group may cross it"
     );
     let cheap = out
         .records
@@ -189,10 +190,60 @@ fn a_slot_stops_at_its_cap_and_the_others_run_on() {
         ["strong"]
     );
     let spent = spent_by_slot(&out.records, &c.price_table()).unwrap();
-    assert_eq!(spent["strong"], 6_000_000);
-    // Both harnesses of the stopped slot ran before it stopped: the plan alternates them.
-    assert!(out.records.iter().any(|r| r.arm == "old.strong"));
-    assert!(out.records.iter().any(|r| r.arm == "new.strong"));
+    assert_eq!(spent["strong"], 8_000_000);
+    assert_paired(&out.records, "strong", &["old", "new"]);
+}
+
+/// The harnesses of `slot` ran the same (brief, repetition) set.
+fn assert_paired(records: &[sarathi_eval::metrics::RunRecord], slot: &str, harnesses: &[&str]) {
+    use std::collections::BTreeSet;
+    let set = |h: &str| -> BTreeSet<(&str, u32)> {
+        records
+            .iter()
+            .filter(|r| r.slot == slot && r.arm == RunConfig::arm_name(h, slot))
+            .map(|r| (r.brief.as_str(), r.run))
+            .collect()
+    };
+    let first = set(harnesses[0]);
+    assert!(!first.is_empty(), "slot {slot}: no runs");
+    for h in &harnesses[1..] {
+        assert_eq!(
+            set(h),
+            first,
+            "slot {slot}: {h} and {} ran different (brief, run) sets",
+            harnesses[0]
+        );
+    }
+}
+
+#[test]
+fn a_stop_never_leaves_a_slot_unpaired() {
+    // Every cap from one to nine $2 runs, with odd briefs reversing the arm order, so the crossing run falls on either
+    // harness: the stopped slot's two harnesses still ran the same (brief, repetition) set.
+    let h = Spender;
+    let bs = briefs(5);
+    for cap in 1..=9 {
+        let mut c = RunConfig::from_json(A9).unwrap();
+        c.slots[0].cap_usd = cap;
+        let arms = [
+            arm(&c, "old", "strong", &h),
+            arm(&c, "new", "cheap-tools", &h),
+            arm(&c, "new", "strong", &h),
+            arm(&c, "old", "cheap-tools", &h),
+        ];
+        let out = run_within_caps(&c, &bs, &arms, &Always, Purpose::Measure, &[]).unwrap();
+        assert!(out.stopped.contains("strong"), "cap ${cap}");
+        let strong = out.records.iter().filter(|r| r.slot == "strong").count() as u64;
+        // Whole groups of two runs, and at most one group past the cap.
+        assert_eq!(strong % 2, 0, "cap ${cap}");
+        // $2 a run: the slot reached its cap, and it was below the cap before its last group ($4).
+        assert!(
+            strong * 2 >= cap && strong * 2 < cap + 4,
+            "cap ${cap}: {strong} runs"
+        );
+        assert_paired(&out.records, "strong", &["old", "new"]);
+        assert_paired(&out.records, "cheap-tools", &["old", "new"]);
+    }
 }
 
 #[test]
@@ -218,8 +269,17 @@ fn an_arm_must_match_its_configured_slot() {
     let bs = briefs(1);
     let e = run_within_caps(&c, &bs, &[wrong], &Always, Purpose::Measure, &[]).unwrap_err();
     assert!(matches!(e, CappedRunError::Arm { .. }), "{e}");
-    let mut unknown = arm(&c, "new", "strong", &h);
-    unknown.slot = "huge".into();
+    let mut renamed = arm(&c, "new", "strong", &h);
+    renamed.name = "newer.strong".into();
+    assert!(
+        matches!(
+            run_within_caps(&c, &bs, &[renamed], &Always, Purpose::Measure, &[]),
+            Err(CappedRunError::Arm { .. })
+        ),
+        "an arm of an unconfigured harness"
+    );
+    let mut unknown = arm(&c, "new", "huge", &h);
+    unknown.model = "claude-sonnet-5-5".into();
     assert!(matches!(
         run_within_caps(&c, &bs, &[unknown], &Always, Purpose::Measure, &[]),
         Err(CappedRunError::Arm { .. })

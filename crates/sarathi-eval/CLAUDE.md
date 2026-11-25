@@ -6,8 +6,10 @@ unless a caller passes a live provider explicitly.
 - `metrics.rs`: `RunRecord`, `PriceTable` (micro-dollars, exact; cache writes have their own price, or the input price when
   none is given), per-brief and per-arm stats (the metrics table).
 - `config.rs`: the run-configuration file (`RunConfig`: slot -> model, native tools or not, price, cap in whole dollars, total cap;
-  versioned, unknown fields refused) and `run_within_caps` (the runner's plan, run by run; a slot stops once its spend,
-  earlier records included, reaches its cap, so it can overshoot by one run; arms are `<harness>.<slot>`).
+  versioned, unknown fields refused) and `run_within_caps` (the runner's plan, run by run; the cap is checked per group,
+  one brief and repetition on one slot over every harness, so a stopped slot stays paired and overshoots by at most one
+  group; earlier records count; arms are `<harness>.<slot>`; `CappedRun::stopped` goes to `Report::stopped` and
+  `ArmPair::stopped`).
 - `killline.rs`: the kill-line rule as one pure function; the tolerance is an input.
 - `brief.rs`: brief-set JSONL format (header line, then briefs; unknown fields refused; split tuning/measurement).
 - `cassette.rs`: cassette JSONL format, reader and writer, request match naming the first differing field, secret scan.
