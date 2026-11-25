@@ -14,6 +14,8 @@ publish = false
 # Dependencies: one table, `default-features = false`, exact pins for HTTP and MCP crates.
 [workspace.dependencies]
 sarathi-protocol = { path = "crates/sarathi-protocol" }
+sarathi-provider = { path = "crates/sarathi-provider" }
+sarathi-tools = { path = "crates/sarathi-tools" }
 async-stream = { version = "=0.3.6", default-features = false }
 bytes = { version = "1.12", default-features = false, features = ["std"] }
 futures = { version = "0.3.34", default-features = false, features = ["std"] }

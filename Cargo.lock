@@ -1070,7 +1070,18 @@ dependencies = [
 name = "sarathi-core"
 version = "0.0.0"
 dependencies = [
+ "bytes",
+ "proptest",
+ "sarathi-context",
+ "sarathi-log",
+ "sarathi-protocol",
+ "sarathi-provider",
+ "sarathi-tools",
+ "serde",
+ "serde_json",
+ "tempfile",
  "thiserror",
+ "tokio",
 ]
 
 [[package]]

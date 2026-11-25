@@ -49,11 +49,12 @@ copied file keeps a header line `// Derived from Ultrafast Gateway @ <short hash
 
 ## Vyasa
 
-Three files of `sarathi-provider::resilience` are rewritten from Vyasa (<https://github.com/vyasa-cms/vyasa>).
+Three files of `sarathi-provider::resilience` and four of `sarathi-core` (the run loop and its tests) are rewritten
+from Vyasa (<https://github.com/vyasa-cms/vyasa>).
 
 | Field | Value |
 |---|---|
-| Source | `github.com/vyasa-cms/vyasa`, `crates/ai/src/{circuit,failover,budget}.rs` |
+| Source | `github.com/vyasa-cms/vyasa`, `crates/ai/src/{circuit,failover,budget,agent}.rs` |
 | Source licence | MIT OR Apache-2.0 (used under Apache-2.0) |
 | Source commit | `2403be1a61f4e3147019671c49b95c02afe91a99` |
 
@@ -64,6 +65,17 @@ Three files of `sarathi-provider::resilience` are rewritten from Vyasa (<https:/
 | `budget.rs` | `budget.rs` | whole micro-dollars (`u64`) instead of `f64` dollars; the window is the caller's (the original fixed the UTC month); the error is `ErrorKind::BudgetExceeded` |
 
 Each file keeps a header line naming its source above its SPDX line.
+
+### The run loop (`sarathi-core`), from `crates/ai/src/agent.rs` @ `2403be1`
+
+Rewritten as a state machine with no IO (Vyasa's loop is one async function).
+
+| Written to (`crates/sarathi-core/src/`) | From | Changes |
+|---|---|---|
+| `step.rs` | `agent.rs`: `StepReply`, the correction, unknown-tool, refusal and ran-out wordings | the step is read with its `input` bytes kept as written; a fenced step is read; the unknown-tool text has a form without `"done"` for native tool calls |
+| `profile.rs` | `agent.rs`: `step_schema`, `protocol` | the schema is a constant; the protocol text says results come back as `observation:` messages and drops the page-specific sentence (the host's system prompt carries it) |
+| `core.rs` | `agent.rs`: `run_agent`, `MAX_STEPS_CEILING`, `MAX_CONSECUTIVE_FAILURES` | a multi-turn conversation instead of a transcript rebuilt every step (the prefix stays byte-stable); no observation truncation or collapsing (context size is handled elsewhere); native tool calls, permissions, steering, interrupts, a spend cap and a repeated-call guard are new |
+| `core/tests.rs` | `agent.rs` tests: acts then finishes, an unknown tool becomes a correction, the step cap ends the run, a tool refusal is an observation | the same scenarios as input and action sequences against the state machine instead of a mock provider; every other test in the file is new |
 
 ## Rules
 

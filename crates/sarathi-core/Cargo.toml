@@ -8,8 +8,62 @@ license.workspace = true
 repository.workspace = true
 publish.workspace = true
 
+[features]
+default = ["anthropic", "openai"]
+# The Anthropic Messages API as the driver's model.
+anthropic = ["dep:sarathi-provider", "dep:bytes"]
+# OpenAI-style chat completions (OpenAI and the compatible APIs) as the driver's model.
+openai = ["dep:sarathi-provider", "dep:bytes"]
+# A hook called after every append, for crash tests. Never in a host's build.
+fault-injection = []
+
 [dependencies]
+bytes = { workspace = true, optional = true }
+sarathi-context.workspace = true
+sarathi-log.workspace = true
+sarathi-protocol.workspace = true
+sarathi-tools.workspace = true
+sarathi-provider = { workspace = true, optional = true }
+serde.workspace = true
+serde_json = { workspace = true, features = ["raw_value"] }
 thiserror.workspace = true
+tokio = { workspace = true, features = ["sync", "time", "macros"] }
+
+[dev-dependencies]
+proptest.workspace = true
+sarathi-provider.workspace = true
+tempfile.workspace = true
+tokio = { workspace = true, features = ["rt", "macros", "time", "test-util", "net", "io-util"] }
+
+[[test]]
+name = "driver"
+path = "tests/driver.rs"
+required-features = ["anthropic"]
+
+[[test]]
+name = "context"
+path = "tests/context.rs"
+required-features = ["anthropic"]
+
+[[test]]
+name = "anthropic"
+path = "tests/anthropic.rs"
+required-features = ["anthropic"]
+
+[[test]]
+name = "toolbox"
+path = "tests/toolbox.rs"
+required-features = ["anthropic"]
+
+[[test]]
+name = "openai"
+path = "tests/openai.rs"
+required-features = ["anthropic", "openai"]
+
+[[test]]
+name = "kill_and_resume"
+path = "tests/kill_and_resume.rs"
+required-features = ["anthropic", "fault-injection"]
 
 [lints]
 workspace = true
