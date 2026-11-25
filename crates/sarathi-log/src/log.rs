@@ -320,8 +320,8 @@ impl Log {
                         "no open assistant message asked for call `{call}`"
                     )));
                 }
-                // A started read may start again after a restart; nothing starts or answers a call again once it
-                // has its result.
+                // A call may start again (after a restart; the core keeps a started write from running twice);
+                // nothing starts or answers a call again once it has its result.
                 if self.answered_after(at, call) {
                     return Err(invalid(format!(
                         "call `{call}` already has its tool.result"
@@ -350,7 +350,7 @@ impl Log {
         Ok(())
     }
 
-    /// A fork cut short before its `segment.start` is an orphan: readable, but nothing can be appended to it.
+    /// A fork cut short before its `segment.start` is an orphan: readable, but nothing can be appended after its copy.
     ///
     /// In a forked session, the entry after the copy of the parent's lines is the fork's `segment.start`, and it is
     /// accepted only if the copy hashes to the header's digest. So a log a store accepted never fails

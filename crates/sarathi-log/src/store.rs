@@ -26,8 +26,9 @@ pub enum Durability {
 pub struct Recovered {
     /// Bytes of a torn last line that were dropped.
     pub truncated_bytes: u64,
-    /// The store cut the file and recorded the loss in a `note` entry. False when another writer holds the session:
-    /// the read stops at the last complete line and the file is left as it is.
+    /// The store cut the file and recorded the loss in a `note` entry, except where a fork's `segment.start` belongs
+    /// (no note may stand there: the tear is cut and nothing is written). False when the read changes nothing (another
+    /// writer holds the session, or a read-only read): the read stops at the last complete line.
     pub repaired: bool,
 }
 

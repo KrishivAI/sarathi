@@ -202,7 +202,12 @@ impl Inner {
             // `segment.start`), the tear is cut and nothing is written: a fork cut short is read as it is.
             let mut line = encode_entry(&note)?;
             line.push('\n');
-            if log.append(note.seq, vec![note]).is_ok() {
+            let fork_start = log
+                .header()
+                .forked_from
+                .is_some_and(|f| f.seq.0.checked_add(1) == Some(note.seq.0));
+            if !fork_start {
+                log.append(note.seq, vec![note])?;
                 file.write_all(line.as_bytes())?;
                 len += line.len() as u64;
             }
