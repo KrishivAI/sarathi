@@ -41,7 +41,7 @@ started write from running twice);
 `turn.end`, a `message.user` that starts a turn and a `model.request` come only after every such call has its
 `tool.result` (an interrupt answers open calls first); `model.request.sha256` is 64 lower-case hex digits. In a
 fork, the entry after the copy of the parent's lines is the fork's `segment.start`, accepted only if the copy hashes
-to `forked_from.sha256`; a fork cut short before it is an orphan: read as it is, and nothing can be appended to it
+to `forked_from.sha256`; a fork cut short before it is an orphan: read as it is, and nothing can be appended after its copy
 (a torn line in its place is cut without a repair note).
 
 Not checked on append: that a request's recipe rebuilds to its `sha256`. The body is assembled by the provider

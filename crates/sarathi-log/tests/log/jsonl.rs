@@ -377,7 +377,7 @@ async fn a_fork_torn_at_every_byte_of_its_last_lines_loads_and_reloads() {
                 .map(|(i, _)| i + 1),
         )
         .collect();
-    for cut in starts[11]..full.len() - 1 {
+    for cut in starts[11]..full.len() {
         if starts.contains(&cut) {
             continue;
         }
@@ -406,6 +406,7 @@ async fn a_fork_point_at_the_end_of_the_seq_range_does_not_overflow() {
         text.replacen("\"seq\":11,", &format!("\"seq\":{},", u64::MAX), 1),
     )
     .unwrap();
-    // Whatever it reads as, reading it does not overflow.
-    let _ = JsonlStore::new(root.path()).read(child).await;
+    // Reading it does not overflow (a panic on the blocking pool would come back as an IO error).
+    let r = JsonlStore::new(root.path()).read(child).await;
+    assert!(r.is_ok(), "{r:?}");
 }
