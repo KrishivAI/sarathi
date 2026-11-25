@@ -33,7 +33,3 @@ workspace = true
 name = "context"
 path = "tests/context.rs"
 required-features = ["fs"]
-
-[[test]]
-name = "long_run"
-path = "tests/long_run.rs"

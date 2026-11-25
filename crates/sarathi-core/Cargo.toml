@@ -46,6 +46,11 @@ path = "tests/context.rs"
 required-features = ["anthropic"]
 
 [[test]]
+name = "long_run"
+path = "tests/long_run.rs"
+required-features = ["anthropic"]
+
+[[test]]
 name = "anthropic"
 path = "tests/anthropic.rs"
 required-features = ["anthropic"]
