@@ -1,0 +1,32 @@
+[workspace]
+resolver = "3"
+members = ["crates/*"]
+
+[workspace.package]
+version = "0.0.0"
+edition = "2024"
+# MSRV: CI builds at 1.94 as well as the pinned toolchain (rust-toolchain.toml).
+rust-version = "1.94"
+license = "Apache-2.0"
+repository = "https://github.com/KrishivAI/sarathi"
+publish = false
+
+# Dependencies: one table, `default-features = false`, exact pins for HTTP and MCP crates.
+# None yet.
+[workspace.dependencies]
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+missing_docs = "warn"
+unreachable_pub = "warn"
+
+[workspace.lints.clippy]
+# Lint exceptions are `#[expect(lint, reason = "...")]`, never a bare `#[allow]`.
+allow_attributes = "warn"
+allow_attributes_without_reason = "warn"
+unwrap_used = "warn"
+expect_used = "warn"
+panic = "warn"
+dbg_macro = "warn"
+todo = "warn"
+unimplemented = "warn"

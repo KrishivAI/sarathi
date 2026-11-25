@@ -1,0 +1,57 @@
+name: PR policy
+
+# Repository policy that does not need a build. The job name `policy` is a required status check.
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, edited]
+  merge_group:
+    types: [checks_requested]
+  push:
+    branches: [main]
+
+concurrency:
+  group: pr-policy-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  policy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - run: scripts/spdx.sh
+      - run: scripts/file-size.sh
+      - name: No pull_request_target, no self-hosted runners
+        run: |
+          if grep -rnE 'pull_request_target|self-hosted' .github/workflows --exclude=pr-policy.yml; then
+            echo "policy: pull_request_target and self-hosted runners are banned" >&2; exit 1
+          fi
+      - name: Third-party actions are pinned by full commit SHA
+        run: |
+          bad=$(grep -rnE '^\s*-?\s*uses: [^ ]+@' .github/workflows | grep -vE '@[0-9a-f]{40}( |$)' || true)
+          if [ -n "$bad" ]; then echo "$bad" >&2; echo "policy: pin actions by SHA" >&2; exit 1; fi
+      - name: Large-file guard
+        if: github.event_name == 'pull_request'
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: .github/scripts/check-large-files.sh "$BASE_SHA" "$HEAD_SHA"
+      - name: DCO sign-off
+        if: github.event_name == 'pull_request'
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: scripts/dco.sh "$BASE_SHA" "$HEAD_SHA"
+      - name: No AI attribution
+        if: github.event_name == 'pull_request'
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          PR_TITLE: ${{ github.event.pull_request.title }}
+          PR_BODY: ${{ github.event.pull_request.body }}
+        run: .github/scripts/check-ai-attribution.sh "$BASE_SHA" "$HEAD_SHA"

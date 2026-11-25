@@ -1,0 +1,13 @@
+Sarathi
+Copyright 2026 The Sarathi Authors
+
+This product is licensed under the Apache License, Version 2.0 (see LICENSE).
+Contributions are accepted under the Developer Certificate of Origin (DCO);
+sign off every commit with `git commit -s`.
+
+Notices that must be preserved are listed below. Add an entry whenever third-party code, data or test files are
+copied into this repository (not for ordinary dependencies, whose licenses are tracked by `cargo deny`).
+
+--------------------------------------------------------------------------------
+Ultrafast Gateway (MIT licensed): see PROVENANCE.md. Nothing is copied yet.
+If code from another project is ever copied, its notice goes here.

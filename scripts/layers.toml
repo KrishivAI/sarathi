@@ -1,0 +1,12 @@
+# Layer rule: a crate depends only on crates in the same or a lower layer.
+# `scripts/layering.py` checks every workspace crate against this table; a new crate must be listed here.
+[layers]
+sarathi-protocol = 0
+sarathi-provider = 1
+sarathi-log = 1
+sarathi-tools = 2
+sarathi-core = 3
+sarathi-mcp = 3
+sarathi-skills = 3
+sarathi-eval = 4
+sarathi = 5
