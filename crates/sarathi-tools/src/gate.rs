@@ -33,10 +33,35 @@ pub trait PermissionHost: Send + Sync {
 /// Whether a call may run.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Access {
-    /// Run it.
-    Allowed,
+    /// Run it. `asked` is the host's answer when the host was asked (the caller logs it, source included).
+    Allowed {
+        /// The answer, or `None` when a rule or the mode allowed the call without asking.
+        asked: Option<Decision>,
+        /// The session rule an "allow always" added, as text, so a resumed session can add it again.
+        added_rule: Option<String>,
+    },
     /// Do not run it; the model is told this.
-    Denied(String),
+    Denied {
+        /// What the model is told.
+        reason: String,
+        /// The host's answer when the host was asked and refused.
+        asked: Option<Decision>,
+    },
+}
+
+impl Access {
+    fn allowed() -> Self {
+        Access::Allowed {
+            asked: None,
+            added_rule: None,
+        }
+    }
+    fn denied(reason: impl Into<String>) -> Self {
+        Access::Denied {
+            reason: reason.into(),
+            asked: None,
+        }
+    }
 }
 
 /// A [`Policy`] plus the host that answers its asks. With no host an ask is a refusal, so a host that forgets to set
@@ -62,8 +87,8 @@ impl Gate {
         &mut self.policy
     }
 
-    /// Decides one call. An "allow always" answer adds a session-scope allow for the tool (deny rules still win next
-    /// time).
+    /// Decides one call. An "allow always" answer adds a session-scope allow for this tool and subject only (deny
+    /// rules still win next time).
     pub async fn check(
         &mut self,
         call: &CallId,
@@ -72,11 +97,11 @@ impl Gate {
         subject: Option<String>,
     ) -> Access {
         match self.policy.evaluate(spec, subject.as_deref()) {
-            Verdict::Allow => Access::Allowed,
-            Verdict::Deny(why) => Access::Denied(why),
+            Verdict::Allow => Access::allowed(),
+            Verdict::Deny(why) => Access::denied(why),
             Verdict::Ask => {
                 let Some(host) = self.host.clone() else {
-                    return Access::Denied(format!(
+                    return Access::denied(format!(
                         "`{}` needs permission and there is no one to ask",
                         spec.name
                     ));
@@ -85,19 +110,32 @@ impl Gate {
                     call: call.clone(),
                     tool: spec.name.clone(),
                     input: input.clone(),
-                    subject,
+                    subject: subject.clone(),
                 };
-                match host.ask(&req).await {
-                    Decision::AllowOnce => Access::Allowed,
+                let answer = host.ask(&req).await;
+                match &answer {
+                    Decision::AllowOnce => Access::Allowed {
+                        asked: Some(answer),
+                        added_rule: None,
+                    },
                     Decision::AllowAlways => {
-                        if let Ok(rule) = Rule::parse(Effect::Allow, &spec.name) {
-                            self.policy.add(Scope::Session, rule);
+                        let rule = Rule::exact(Effect::Allow, &spec.name, subject.as_deref());
+                        let added_rule = Some(rule.as_str().to_owned());
+                        self.policy.add(Scope::Session, rule);
+                        Access::Allowed {
+                            asked: Some(answer),
+                            added_rule,
                         }
-                        Access::Allowed
                     }
-                    Decision::Deny { reason } => Access::Denied(reason.into()),
+                    Decision::Deny { reason } => Access::Denied {
+                        reason: reason.to_string(),
+                        asked: Some(answer.clone()),
+                    },
                     // A decision this version does not know is not a yes.
-                    _ => Access::Denied("the host's answer was not understood".to_owned()),
+                    _ => Access::Denied {
+                        reason: "the host's answer was not understood".to_owned(),
+                        asked: Some(answer),
+                    },
                 }
             }
         }
@@ -145,7 +183,13 @@ mod tests {
         let h = host(Decision::AllowOnce);
         let mut g = Gate::new(Policy::new(Mode::Default), Some(h.clone()));
         let r = block_on(g.check(&id(), &spec(), &json!({"cmd":"ls"}), Some("ls".into())));
-        assert_eq!(r, Access::Allowed);
+        assert!(matches!(
+            r,
+            Access::Allowed {
+                asked: Some(Decision::AllowOnce),
+                ..
+            }
+        ));
         let seen = h.seen.lock().unwrap();
         assert_eq!(seen.len(), 1);
         assert_eq!(seen[0].subject.as_deref(), Some("ls"));
@@ -155,26 +199,33 @@ mod tests {
     fn allow_always_is_remembered_but_deny_rules_still_win() {
         let h = host(Decision::AllowAlways);
         let mut g = Gate::new(Policy::default(), Some(h.clone()));
-        assert_eq!(
-            block_on(g.check(&id(), &spec(), &json!({}), None)),
-            Access::Allowed
-        );
-        assert_eq!(
-            block_on(g.check(&id(), &spec(), &json!({}), None)),
-            Access::Allowed
-        );
+        let first = block_on(g.check(&id(), &spec(), &json!({}), Some("ls".into())));
+        assert!(matches!(
+            &first,
+            Access::Allowed { added_rule: Some(r), .. } if r == "bash(ls)"
+        ));
+        assert!(matches!(
+            block_on(g.check(&id(), &spec(), &json!({}), Some("ls".into()))),
+            Access::Allowed { asked: None, .. }
+        ));
         assert_eq!(
             h.seen.lock().unwrap().len(),
             1,
             "the second call is not asked"
+        );
+        block_on(g.check(&id(), &spec(), &json!({}), Some("rm x".into())));
+        assert_eq!(
+            h.seen.lock().unwrap().len(),
+            2,
+            "another subject is asked again"
         );
         g.policy_mut().add(
             Scope::Organisation,
             Rule::parse(Effect::Deny, "bash").unwrap(),
         );
         assert!(matches!(
-            block_on(g.check(&id(), &spec(), &json!({}), None)),
-            Access::Denied(_)
+            block_on(g.check(&id(), &spec(), &json!({}), Some("ls".into()))),
+            Access::Denied { .. }
         ));
     }
 
@@ -184,12 +235,16 @@ mod tests {
             reason: "outside the project".into(),
         });
         let mut g = Gate::new(Policy::default(), Some(h));
-        assert_eq!(
-            block_on(g.check(&id(), &spec(), &json!({}), None)),
-            Access::Denied("outside the project".into())
-        );
+        let Access::Denied { reason, asked } = block_on(g.check(&id(), &spec(), &json!({}), None))
+        else {
+            panic!("the host said no");
+        };
+        assert_eq!(reason, "outside the project");
+        assert!(matches!(asked, Some(Decision::Deny { .. })));
         let mut g = Gate::new(Policy::default(), None);
-        let Access::Denied(why) = block_on(g.check(&id(), &spec(), &json!({}), None)) else {
+        let Access::Denied { reason: why, .. } =
+            block_on(g.check(&id(), &spec(), &json!({}), None))
+        else {
             panic!("no host, no yes");
         };
         assert!(why.contains("no one to ask"), "{why}");

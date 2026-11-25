@@ -7,5 +7,5 @@ Tools, permissions and hooks. Depends on `sarathi-protocol` only.
 - `gate.rs`: the policy plus a host callback (`PermissionHost`, may stay pending); no host means an ask is a refusal.
   "Allow always" adds a session rule.
 - `hook.rs`: pre-tool (block or rewrite), post-tool (replace output), stop (send the model back to work).
-- `runner.rs`: `ToolRunner` runs one call: pre hooks, gate, tool, post hooks; never an error, always a result.
+- `runner.rs`: `ToolRunner::prepare` (hooks + gate, may wait for a person) then `execute` (tool + post hooks) so a host logs the decision and the start mark between; `run` does both. Never an error, always a result.
 Rules: the tool list is read once per session (fixed prefix); a refused call never reaches the tool.

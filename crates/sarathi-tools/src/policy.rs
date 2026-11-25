@@ -90,6 +90,7 @@ impl Policy {
     pub fn evaluate(&self, spec: &ToolSpec, subject: Option<&str>) -> Verdict {
         let mut ask = false;
         let mut allow = false;
+        let mut session_allow = false;
         for (scope, rule) in &self.rules {
             if !rule.matches(&spec.name, subject) {
                 continue;
@@ -104,8 +105,23 @@ impl Policy {
                     ));
                 }
                 Effect::Ask => ask = true,
-                Effect::Allow => allow = true,
+                Effect::Allow => {
+                    allow = true;
+                    session_allow |= *scope == Scope::Session;
+                }
             }
+        }
+        // Plan mode never acts, whatever allows or asks say; only a deny was stronger.
+        if self.mode == Mode::Plan && !spec.read_only {
+            return Verdict::Deny(format!(
+                "`{}` changes things and the session is in plan mode",
+                spec.name
+            ));
+        }
+        // An "allow always" answer is the person's own decision at that very prompt: it ends the asking an ask rule
+        // would otherwise repeat for ever. A deny still won above.
+        if session_allow {
+            return Verdict::Allow;
         }
         if ask {
             return Verdict::Ask;
@@ -173,6 +189,26 @@ mod tests {
             Verdict::Deny(_)
         ));
         assert_eq!(at(Mode::Bypass).evaluate(&other, None), Verdict::Allow);
+    }
+
+    #[test]
+    fn plan_mode_refuses_an_allowed_edit_and_a_session_allow_ends_an_ask_rule() {
+        let mut p = Policy::new(Mode::Plan);
+        p.add(Scope::User, rule(Effect::Allow, "edit"));
+        assert!(matches!(
+            p.evaluate(&spec("edit").edits(), None),
+            Verdict::Deny(_)
+        ));
+        assert_eq!(p.evaluate(&spec("look").read_only(), None), Verdict::Allow);
+        let mut p = Policy::default();
+        p.add(Scope::Project, rule(Effect::Ask, "bash"));
+        assert_eq!(p.evaluate(&spec("bash"), Some("ls")), Verdict::Ask);
+        p.add(
+            Scope::Session,
+            Rule::exact(Effect::Allow, "bash", Some("ls")),
+        );
+        assert_eq!(p.evaluate(&spec("bash"), Some("ls")), Verdict::Allow);
+        assert_eq!(p.evaluate(&spec("bash"), Some("rm x")), Verdict::Ask);
     }
 
     #[test]

@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 //! The runner: one tool call through hooks, the permission gate and the tool.
 
-use sarathi_protocol::{CallId, RawJson, ToolOutput};
+use sarathi_protocol::{CallId, Decision, RawJson, ToolOutput};
 use serde_json::Value;
 
 use crate::gate::{Access, Gate};
@@ -34,6 +34,8 @@ pub struct Executed {
     pub input: Value,
     /// The tool's evidence kind for a completion check, when it ran.
     pub evidence: Option<String>,
+    /// The host's answer when it was asked (a refusal's source, or what let the call run).
+    pub asked: Option<Decision>,
 }
 
 impl Executed {
@@ -45,13 +47,19 @@ impl Executed {
         }
     }
 
-    fn refused(disposition: Disposition, text: String, input: Value) -> Self {
+    fn refused(
+        disposition: Disposition,
+        text: String,
+        input: Value,
+        asked: Option<Decision>,
+    ) -> Self {
         Executed {
             disposition,
             text,
             is_error: true,
             input,
             evidence: None,
+            asked,
         }
     }
 }
@@ -91,32 +99,62 @@ impl<T: Toolbox> ToolRunner<T> {
         &self.hooks
     }
 
-    /// Runs one call: pre-tool hooks, the permission check, the tool, post-tool hooks. Never an error: every outcome
-    /// is a result the model can read. The caller writes the start mark before this and the result after it.
-    pub async fn run(&mut self, call: &CallId, name: &str, input: Value) -> Executed {
+    /// The first half of a call: the tool lookup, pre-tool hooks and the permission check (which may wait for a
+    /// person). Nothing has run when this returns. The caller logs the decision, then the start mark, then calls
+    /// [`execute`](Self::execute); a refused call gets a result and no start mark.
+    pub async fn prepare(&mut self, call: &CallId, name: &str, input: Value) -> Prepared {
         let Some(spec) = self.specs.iter().find(|s| s.name == name).cloned() else {
             let names: Vec<&str> = self.specs.iter().map(|s| s.name.as_str()).collect();
-            return Executed::refused(
+            return Prepared::Refused(Executed::refused(
                 Disposition::Unknown,
                 format!("unknown tool `{name}`; the tools are: {}", names.join(", ")),
                 input,
-            );
+                None,
+            ));
         };
         let input = match self.hooks.run_pre(call, name, &input).await {
             Ok(v) => v,
-            Err(reason) => return Executed::refused(Disposition::Blocked, reason, input),
+            Err(reason) => {
+                return Prepared::Refused(Executed::refused(
+                    Disposition::Blocked,
+                    reason,
+                    input,
+                    None,
+                ));
+            }
         };
         let subject = self.toolbox.subject(name, &input);
-        if let Access::Denied(reason) = self.gate.check(call, &spec, &input, subject).await {
-            return Executed::refused(Disposition::Denied, reason, input);
+        match self.gate.check(call, &spec, &input, subject.clone()).await {
+            Access::Denied { reason, asked } => {
+                Prepared::Refused(Executed::refused(Disposition::Denied, reason, input, asked))
+            }
+            Access::Allowed { asked, added_rule } => Prepared::Ready(Ready {
+                name: name.to_owned(),
+                spec,
+                input,
+                subject,
+                asked,
+                added_rule,
+            }),
         }
-        let (text, is_error) = match self.toolbox.call(name, &input).await {
+    }
+
+    /// The second half: runs the tool and the post-tool hooks. Call it after the start mark is on disk.
+    pub async fn execute(&mut self, call: &CallId, ready: Ready) -> Executed {
+        let Ready {
+            name,
+            spec,
+            input,
+            asked,
+            ..
+        } = ready;
+        let (text, is_error) = match self.toolbox.call(&name, &input).await {
             Ok(t) => (t, false),
             Err(t) => (t, true),
         };
         let text = self
             .hooks
-            .run_post(call, name, &input, text, is_error)
+            .run_post(call, &name, &input, text, is_error)
             .await;
         Executed {
             disposition: Disposition::Ran,
@@ -124,8 +162,44 @@ impl<T: Toolbox> ToolRunner<T> {
             is_error,
             input,
             evidence: spec.evidence,
+            asked,
         }
     }
+
+    /// Both halves in one call, for a host that keeps no log between them. Never an error: every outcome is a result
+    /// the model can read. A host with a log between the halves uses [`prepare`](Self::prepare) and
+    /// [`execute`](Self::execute) instead.
+    pub async fn run(&mut self, call: &CallId, name: &str, input: Value) -> Executed {
+        match self.prepare(call, name, input).await {
+            Prepared::Refused(done) => done,
+            Prepared::Ready(ready) => self.execute(call, ready).await,
+        }
+    }
+}
+
+/// A call that passed the hooks and the permission check and has not run.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Ready {
+    /// The tool's name.
+    pub name: String,
+    spec: ToolSpec,
+    /// The input to run with (after pre-tool hooks), for the log.
+    pub input: Value,
+    /// What a rule pattern matched against, for the log.
+    pub subject: Option<String>,
+    /// The host's answer, when it was asked: log it before the start mark.
+    pub asked: Option<Decision>,
+    /// The session rule an "allow always" added; a resumed session adds it again from the log.
+    pub added_rule: Option<String>,
+}
+
+/// The first half of a call.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Prepared {
+    /// Nothing will run; this is the result.
+    Refused(Executed),
+    /// Log the decision and the start mark, then [`ToolRunner::execute`].
+    Ready(Ready),
 }
 
 #[cfg(test)]
@@ -239,6 +313,26 @@ mod tests {
         let out = block_on(r.run(&id(), "lok", json!({})));
         assert_eq!(out.disposition, Disposition::Unknown);
         assert!(out.text.contains("the tools are: look"), "{}", out.text);
+    }
+
+    #[test]
+    fn prepare_runs_nothing_and_a_refusal_has_no_ready_half() {
+        let gate = Gate::new(Policy::default(), Some(Arc::new(Yes)));
+        let (mut r, n) = runner(false, gate, Hooks::new());
+        let Prepared::Ready(ready) = block_on(r.prepare(&id(), "look", json!({}))) else {
+            panic!("the host said yes");
+        };
+        assert_eq!(*n.lock().unwrap(), 0, "prepared, not run");
+        assert_eq!(ready.asked, Some(Decision::AllowOnce));
+        let out = block_on(r.execute(&id(), ready));
+        assert_eq!((out.disposition, *n.lock().unwrap()), (Disposition::Ran, 1));
+        assert_eq!(out.asked, Some(Decision::AllowOnce));
+        let (mut r, n) = runner(false, Gate::new(Policy::default(), None), Hooks::new());
+        assert!(matches!(
+            block_on(r.prepare(&id(), "look", json!({}))),
+            Prepared::Refused(e) if e.disposition == Disposition::Denied
+        ));
+        assert_eq!(*n.lock().unwrap(), 0);
     }
 
     struct Guard;

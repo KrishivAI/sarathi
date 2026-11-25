@@ -19,7 +19,7 @@ pub struct ToolSpec {
     pub description: String,
     /// JSON Schema of the input.
     pub input_schema: Value,
-    /// The tool changes nothing. Read-only calls need no ask in the default mode and may run in parallel.
+    /// The tool changes nothing. Read-only calls need no ask in the default mode. (Calls run one at a time; the flag is for the mode.)
     pub read_only: bool,
     /// The tool edits the workspace (allowed without an ask in [`Mode::AcceptEdits`](crate::Mode::AcceptEdits)).
     pub edits: bool,

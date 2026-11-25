@@ -20,7 +20,7 @@ pub use gate::{Access, AskRequest, Gate, PermissionHost};
 pub use hook::{Hook, Hooks, PostAction, PostTool, PreAction, PreTool, StopAction, StopEvent};
 pub use policy::{Mode, Policy, Scope, Verdict};
 pub use rule::{Effect, Rule, RuleError};
-pub use runner::{Disposition, Executed, ToolRunner};
+pub use runner::{Disposition, Executed, Prepared, Ready, ToolRunner};
 pub use tool::{BoxFuture, Tool, ToolError, ToolResult, ToolSet, ToolSpec, Toolbox};
 
 #[cfg(test)]
