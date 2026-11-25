@@ -13,6 +13,7 @@ publish = false
 
 # Dependencies: one table, `default-features = false`, exact pins for HTTP and MCP crates.
 [workspace.dependencies]
+sarathi-protocol = { path = "crates/sarathi-protocol" }
 serde = { version = "1.0.229", default-features = false, features = ["std", "derive"] }
 serde_json = { version = "1.0.154", default-features = false, features = ["std"] }
 thiserror = { version = "2.0.21", default-features = false, features = ["std"] }
