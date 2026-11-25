@@ -9,3 +9,4 @@ mod conformance;
 mod crash;
 mod fixtures;
 mod jsonl;
+mod seed;

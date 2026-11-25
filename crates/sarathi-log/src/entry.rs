@@ -229,7 +229,8 @@ pub enum Body {
         role: Role,
         /// The `content` value.
         content: RawJson,
-        /// The slice it was made from, if any.
+        /// What it was made from, if anything: a slice (a re-rendered earlier turn), or the `model.response` of a
+        /// compaction call (a server compaction block, byte for byte, or a client summary).
         from: Option<Seq>,
         /// An assistant copy's client tool calls (all answered in the kept turn).
         calls: Vec<CallRef>,
