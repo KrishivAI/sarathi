@@ -125,9 +125,13 @@ async fn a_long_retry_after_moves_on_to_the_next_slot_at_once() {
     ])
     .unwrap()
     .with_retry(fast(3));
-    let start = Instant::now();
-    let out = ask(&chain).await.unwrap();
-    assert!(start.elapsed() < Duration::from_secs(5));
+    // Honouring the 3600 s Retry-After would sleep an hour; moving on takes no wait at all. A bound far below the hour
+    // and far above any scheduling delay checks which one happened without timing the work (a wall-clock bound of a
+    // few seconds failed on a loaded machine).
+    let out = tokio::time::timeout(Duration::from_secs(120), ask(&chain))
+        .await
+        .expect("the chain waited for the 3600 s Retry-After instead of moving on")
+        .unwrap();
     assert_eq!(out.slot, 1);
     assert_eq!(out.failed[0].error.kind, ErrorKind::RateLimited);
     assert_eq!(first.requests().len(), 1, "not retried");
