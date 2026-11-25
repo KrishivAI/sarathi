@@ -232,6 +232,11 @@ version = "0.0.0"
 [[package]]
 name = "sarathi-eval"
 version = "0.0.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "thiserror",
+]
 
 [[package]]
 name = "sarathi-log"
