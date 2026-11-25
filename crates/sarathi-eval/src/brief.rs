@@ -31,7 +31,7 @@ pub struct Brief {
     pub site_context: String,
     /// The brief text.
     pub text: String,
-    /// Model ids this brief may run on; at least one.
+    /// Slots (arm kinds such as `strong`) this brief may run on, not model ids; at least one.
     pub allowed_models: Vec<String>,
     /// Name of the acceptance check that judges the run.
     pub acceptance: String,

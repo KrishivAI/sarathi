@@ -106,6 +106,7 @@ mod tests {
             .map(|(i, a)| RunRecord {
                 brief: "b".into(),
                 arm: arm.into(),
+                slot: String::new(),
                 model: "m".into(),
                 run: i as u32,
                 accepted: *a,

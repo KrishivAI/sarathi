@@ -24,6 +24,9 @@ pub struct RunRecord {
     pub brief: String,
     /// Arm name (harness and model, e.g. `new/strong`).
     pub arm: String,
+    /// The slot the arm filled (the name briefs list in `allowed_models`); empty in records written before slots.
+    #[serde(default)]
+    pub slot: String,
     /// Model id, the key into the [`PriceTable`].
     pub model: String,
     /// Run number within the brief and arm, from 0.
@@ -230,6 +233,7 @@ mod tests {
         RunRecord {
             brief: brief.into(),
             arm: arm.into(),
+            slot: String::new(),
             model: "m".into(),
             run: n,
             accepted,

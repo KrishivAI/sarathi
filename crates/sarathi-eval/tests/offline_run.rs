@@ -47,6 +47,7 @@ fn once() -> Result<(String, String), String> {
     let h = Scripted;
     let arms = [Arm {
         name: "new".into(),
+        slot: "new".into(),
         model: "m".into(),
         harness: &h,
     }];

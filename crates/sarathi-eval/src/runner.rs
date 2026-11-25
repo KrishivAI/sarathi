@@ -49,9 +49,12 @@ pub trait Acceptance {
 
 /// One arm: a name, a model, and the harness that runs it.
 pub struct Arm<'a> {
-    /// Arm name in the report; every brief run on this arm must list it in `allowed_models` (briefs name arms, not
-    /// model ids, so the same set runs against whichever model a run configures for the arm).
+    /// Arm name in the report; unique within a run, so an old and a new harness can share one slot.
     pub name: String,
+    /// The slot this arm fills (`strong`, `cheap-tools`, ...); every brief run on this arm must list it in
+    /// `allowed_models` (briefs name slots, not model ids, so the same set runs against whichever model a run
+    /// configures for the slot).
+    pub slot: String,
     /// Model id, recorded with every run and used to price it.
     pub model: String,
     /// The harness.
@@ -81,7 +84,7 @@ pub enum RunnerError {
     ArmNotAllowed {
         /// The brief id.
         brief: String,
-        /// The arm name.
+        /// The arm's slot.
         arm: String,
     },
     /// Two arms share a name, or an id would leave the run directory.
@@ -164,6 +167,7 @@ pub fn run_briefs(
     guard_split(briefs, purpose)?;
     for (i, a) in arms.iter().enumerate() {
         check_component("arm name", &a.name)?;
+        check_component("arm slot", &a.slot)?;
         if arms[..i].iter().any(|p| p.name == a.name) {
             return Err(RunnerError::Invalid(format!(
                 "arm name `{}` is used twice",
@@ -174,10 +178,10 @@ pub fn run_briefs(
     for b in briefs {
         check_component("brief id", &b.id)?;
         for a in arms {
-            if !b.allowed_models.iter().any(|m| m == &a.name) {
+            if !b.allowed_models.iter().any(|m| m == &a.slot) {
                 return Err(RunnerError::ArmNotAllowed {
                     brief: b.id.clone(),
-                    arm: a.name.clone(),
+                    arm: a.slot.clone(),
                 });
             }
         }
@@ -188,6 +192,7 @@ pub fn run_briefs(
         let mut rec = RunRecord {
             brief: brief.id.clone(),
             arm: arm.name.clone(),
+            slot: arm.slot.clone(),
             model: arm.model.clone(),
             run: p.run,
             accepted: false,
@@ -346,6 +351,7 @@ mod tests {
         };
         let arms = [Arm {
             name: "new".into(),
+            slot: "new".into(),
             model: "m".into(),
             harness: &h,
         }];
@@ -369,6 +375,7 @@ mod tests {
         };
         let arms = [Arm {
             name: "x".into(),
+            slot: "x".into(),
             model: "m".into(),
             harness: &h,
         }];
@@ -392,6 +399,7 @@ mod tests {
         };
         let arm = |name: &str| Arm {
             name: name.into(),
+            slot: name.into(),
             model: "m".into(),
             harness: &h,
         };
@@ -408,6 +416,31 @@ mod tests {
     }
 
     #[test]
+    fn an_old_and_a_new_harness_share_one_slot_in_one_call() {
+        let h = Fake {
+            log: RefCell::new(vec![]),
+            fail_on: None,
+        };
+        let arm = |name: &str, model: &str| Arm {
+            name: name.into(),
+            slot: "strong".into(),
+            model: model.into(),
+            harness: &h,
+        };
+        let mut b = brief("a", Split::Measurement);
+        b.allowed_models = vec!["strong".into(), "cheap-tools".into()];
+        let arms = [arm("old-strong", "model-x"), arm("new-strong", "model-x")];
+        let recs = run_briefs(&[b], &arms, &AcceptOk, 2, Purpose::Measure).unwrap_or_default();
+        assert_eq!(recs.len(), 4);
+        assert!(
+            recs.iter()
+                .all(|r| r.slot == "strong" && r.model == "model-x")
+        );
+        let names: Vec<_> = recs.iter().map(|r| r.arm.as_str()).collect();
+        assert!(names.contains(&"old-strong") && names.contains(&"new-strong"));
+    }
+
+    #[test]
     fn empty_plan_is_refused() {
         let bs = [brief("a", Split::Tuning)];
         assert_eq!(
@@ -421,6 +454,7 @@ mod tests {
         let r = RunRecord {
             brief: "b1".into(),
             arm: "old".into(),
+            slot: String::new(),
             model: "m".into(),
             run: 2,
             accepted: true,
