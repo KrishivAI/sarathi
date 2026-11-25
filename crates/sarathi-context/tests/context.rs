@@ -1127,6 +1127,55 @@ fn before_request_counts_near_a_point_compacts_before_the_limit_and_overflows_pa
 }
 
 #[test]
+fn an_overflow_from_the_estimate_alone_is_counted_first_up_to_twice_the_limit() {
+    // Inside a turn with server compaction, so past the limit the only way out is the fallback.
+    let p = ContextProfile::new(200_000, 64_000);
+    assert_eq!(p.limit(), 136_000);
+    let in_turn = |tokens| {
+        let mut s = Script::new();
+        s.sized_turn(1, tokens);
+        s.user("next");
+        s
+    };
+    let s = in_turn(150_000);
+    assert_eq!(
+        before_request(&s.log, &p, None).unwrap(),
+        ContextAction::CountTokens,
+        "over the limit by estimate, within 200% of it: count before dropping turns"
+    );
+    assert_eq!(
+        before_request(&s.log, &p, Some(130_000)).unwrap(),
+        ContextAction::None,
+        "the count says it fits: nothing is dropped"
+    );
+    assert_eq!(
+        before_request(&s.log, &p, Some(150_000)).unwrap(),
+        ContextAction::Overflow,
+        "the count confirms it: overflow, and no second count"
+    );
+    // Past the window but still within 200% of the limit: counted too.
+    let s = in_turn(250_000);
+    assert_eq!(
+        before_request(&s.log, &p, None).unwrap(),
+        ContextAction::CountTokens
+    );
+    // Far past it: the estimate cannot be that far off, overflow at once.
+    let s = in_turn(300_000);
+    assert_eq!(
+        before_request(&s.log, &p, None).unwrap(),
+        ContextAction::Overflow
+    );
+    // Turned off: the old rule.
+    let mut off = p.clone();
+    off.count_before_overflow_percent = 100;
+    let s = in_turn(150_000);
+    assert_eq!(
+        before_request(&s.log, &off, None).unwrap(),
+        ContextAction::Overflow
+    );
+}
+
+#[test]
 fn a_provider_overflow_forces_the_fallback_and_each_one_at_least_halves_the_request() {
     let mut s = Script::new();
     for n in 1..=6 {
