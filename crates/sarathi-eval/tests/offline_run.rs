@@ -13,7 +13,7 @@ struct Scripted;
 impl Harness for Scripted {
     fn run(&self, b: &Brief, _m: &str, run: u32) -> Result<HarnessOutput, HarnessError> {
         if b.id == "b2" && run == 1 {
-            return Err(HarnessError("cut stream".into()));
+            return Err(HarnessError::new("cut stream"));
         }
         Ok(HarnessOutput {
             artifact: "ok".into(),
@@ -42,6 +42,7 @@ fn once() -> Result<(String, String), String> {
             text: "t".into(),
             allowed_models: vec!["new".into()],
             acceptance: "a".into(),
+            fault: None,
         })
         .collect();
     let h = Scripted;
@@ -58,7 +59,7 @@ fn once() -> Result<(String, String), String> {
     write_records(&dir, "2026-11-28", &recs)
         .map_err(|e| e.to_string())
         .unwrap_or_default();
-    assert!(dir.join("2026-11-28/new/b2/1.json").is_file());
+    assert!(dir.join("2026-11-28/measure/new/b2/1.json").is_file());
     let _ = std::fs::remove_dir_all(&dir);
     let prices: PriceTable =
         serde_json::from_str(r#"{"models":{"m":{"input":1,"output":2,"cached_input":0}}}"#)
@@ -69,6 +70,7 @@ fn once() -> Result<(String, String), String> {
     let report = Report {
         date: "2026-11-28".into(),
         arms: vec![stats],
+        prices,
         kill_line: None,
         deviations: 0,
     };

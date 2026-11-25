@@ -5,9 +5,10 @@ reads N and N-1. Version 1 is the first of each, so no N-1 exists yet; the rules
 
 ## Brief set (`*.jsonl`)
 
-- Line 1 is the header `{"sarathi_brief_set": 1}`; every further line is one brief. Written version: `BRIEF_SET_VERSION`.
+- Line 1 is the header `{"sarathi_brief_set": 2}`; every further line is one brief. Written version: `BRIEF_SET_VERSION`.
 - Brief fields: `id` (unique, a plain path component), `split` (`tuning` | `measurement`), `site_context`, `text`,
-  `allowed_models` (the *slots* a brief may run on, such as `strong`; not model ids), `acceptance` (name of the check).
+  `allowed_models` (the *slots* a brief may run on, such as `strong`; not model ids), `acceptance` (name of the check), and from version 2 an optional `fault` (a fault the harness must inject, e.g.
+  `malformed_steps`). Version 1 sets, which have no `fault`, still read.
 - Unknown fields are refused (`deny_unknown_fields`) in the header and in every brief, so a newer file is never read
   silently as an older one. A newer version number is refused with `BriefError::Version`.
 - N-1 rule: a change that adds a field bumps the version; the new reader accepts the old file by defaulting the
@@ -27,8 +28,5 @@ reads N and N-1. Version 1 is the first of each, so no N-1 exists yet; the rules
 - One pretty-printed JSON object per run: `brief`, `arm` (unique name, e.g. `new-strong`), `slot` (the slot the arm
   filled), `model` (the concrete id; the price key), `run`, `accepted`, `valid_ops`, `total_ops`, `usage`, `steps`,
   `wall_ms`, `error`.
-- **No version field yet and unknown fields are ignored.** `slot` was added after the first draft and is
-  `#[serde(default)]` (empty when absent), so records written before it still load. The next field change must add a
-  `version` field first, with the same N and N-1 rule as the other two formats; until then a record is only valid
-  together with the crate version that wrote it.
-- Components of the path (`arm`, `brief`) are checked to be plain names before anything is written.
+- **Versioned from the start of this change:** `version` (1, `RUN_RECORD_VERSION`) and `purpose` (`tune` | `measure`) are required fields; the path is `<root>/<date>/<purpose>/<arm>/<brief>/<run>.json`. Unknown fields are still ignored, so the next field change bumps `version`. `slot` is `#[serde(default)]` (empty when absent). A tuning pass and the measurement never share a directory, `arm_stats` refuses a mix of purposes, and the kill line fails on stats that are not from a measurement pass.
+- Components of the path (`date`, `arm`, `brief`) are checked to be plain names before anything is written.
