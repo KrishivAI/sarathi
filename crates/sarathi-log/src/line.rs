@@ -194,11 +194,16 @@ pub fn encode_entry(e: &Entry) -> Result<String, LogError> {
                     w.value("steer", &true)?;
                 }
             }
-            Body::ModelRequest { recipe, sha256 } => {
+            Body::ModelRequest {
+                recipe,
+                sha256,
+                compaction,
+            } => {
                 w.value("prefix", &recipe.prefix)?;
                 w.value("messages", &recipe.messages)?;
                 w.slice("params", &recipe.params);
                 w.value("sha256", sha256)?;
+                w.opt_value("compaction", compaction.as_ref())?;
             }
             Body::ModelResponse {
                 body,
@@ -379,6 +384,7 @@ fn decode_entry(line: &str) -> Result<Entry, DecodeError> {
                 params: f.slice("params")?,
             },
             sha256: f.typed("sha256")?,
+            compaction: f.opt_typed::<Strategy>("compaction")?,
         },
         "model.response" => {
             let body = f.slice("body")?;
@@ -603,6 +609,7 @@ mod tests {
                     params: raw(r#"{"max_tokens":10}"#),
                 },
                 sha256: "ab".into(),
+                compaction: None,
             },
             Body::ModelResponse {
                 body,

@@ -9,11 +9,12 @@
 use std::path::{Path, PathBuf};
 
 use sarathi_log::{
-    Body, Durability, JsonlStore, Log, LogStore, MemoryStore, decode_header, fork, render_log,
+    Body, Durability, JsonlStore, Log, LogStore, MemoryStore, SegmentReason, Strategy,
+    decode_header, fork, render_log, sha256_hex,
 };
-use sarathi_protocol::{RawJson, Seq, Usage};
+use sarathi_protocol::{RawJson, Role, Seq, Usage};
 
-use crate::common::{Script, assemble};
+use crate::common::{Script, assemble, raw};
 
 fn dir(version: u32) -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join(format!("fixtures/log/v{version}"))
@@ -89,6 +90,47 @@ async fn write_fixtures(out: &Path) {
     compacted.request();
     write("compaction.jsonl", &render(&compacted.log));
 
+    // A server compaction: the marked request, its block copied into a seed slice, the segment it seeds.
+    let mut server = session(&store).await;
+    server.tool_turn("one", "toolu_01");
+    let recipe = server
+        .log
+        .next_recipe(raw(
+            r#"{"model":"m","max_tokens":1024,"compaction":{"type":"summarize"}}"#,
+        ))
+        .unwrap();
+    let sha256 = sha256_hex(&assemble(&server.log.request_parts(&recipe).unwrap()));
+    server.push(Body::ModelRequest {
+        recipe,
+        sha256,
+        compaction: Some(Strategy::Server),
+    });
+    let block = r#"[{"type":"compaction","content":"Task one is done.","signature":"c2ln"}]"#;
+    let body = format!(r#"{{"id":"msg_c","content":{block},"stop_reason":"compaction"}}"#);
+    let start = u32::try_from(body.find('[').unwrap()).unwrap();
+    let resp = server.push(Body::ModelResponse {
+        content: start..start + u32::try_from(block.len()).unwrap(),
+        body: RawJson::from_string(body).unwrap(),
+        sse: None,
+        request_id: Some("req_c".into()),
+        usage: Usage::default(),
+    });
+    let seed = server.push(Body::SegmentSeed {
+        role: Role::Assistant,
+        content: raw(block),
+        from: Some(resp.seq),
+        calls: vec![],
+    });
+    server.push(Body::SegmentStart {
+        reason: SegmentReason::Compaction,
+        strategy: Some(Strategy::Server),
+        seed: vec![seed.seq],
+        replaces: Some(Seq(1)..seed.seq),
+    });
+    server.user("two");
+    server.request();
+    write("server-compaction.jsonl", &render(&server.log));
+
     let mut parent = session(&store).await;
     parent.tool_turn("one", "toolu_01");
     parent.tool_turn("two", "toolu_02");
@@ -137,7 +179,7 @@ async fn fixtures_of_every_supported_format_load_rebuild_and_resume() {
             seen += 1;
         }
     }
-    assert!(seen >= 8, "fixtures missing: {seen}");
+    assert!(seen >= 9, "fixtures missing: {seen}");
 }
 
 async fn check(path: &Path) {
@@ -173,6 +215,18 @@ async fn check(path: &Path) {
         "compaction.jsonl" => {
             assert_eq!(log.projection().messages, [Seq(2), Seq(20), Seq(23)]);
             assert_eq!(resume.pending_model, Some(Seq(24)));
+        }
+        "server-compaction.jsonl" => {
+            let p = log.projection().messages;
+            assert_eq!(p.len(), 2, "{name}");
+            assert!(matches!(
+                log.get(p[0]).unwrap().body,
+                Body::SegmentSeed { from: Some(_), .. }
+            ));
+            assert_eq!(
+                resume.pending_model,
+                Some(log.entries().last().unwrap().seq)
+            );
         }
         "fork-child.jsonl" => {
             let from = log.header().forked_from.unwrap();

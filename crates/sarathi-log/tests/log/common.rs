@@ -109,7 +109,11 @@ impl Script {
             .next_recipe(raw(r#"{"model":"m","max_tokens":1024}"#))
             .unwrap();
         let sha256 = sha256_hex(&assemble(&self.log.request_parts(&recipe).unwrap()));
-        self.push(Body::ModelRequest { recipe, sha256 })
+        self.push(Body::ModelRequest {
+            recipe,
+            sha256,
+            compaction: None,
+        })
     }
 
     /// A response whose content is `content` (a JSON array), and the assistant message accepting it.

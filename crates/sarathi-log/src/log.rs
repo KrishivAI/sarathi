@@ -4,7 +4,7 @@
 use sarathi_protocol::{MessageSlice, RawJson, Role, Seq};
 use sha2::{Digest, Sha256};
 
-use crate::entry::{Body, CallRef, Effect, Entry, LogHeader, Recipe, SegmentId};
+use crate::entry::{Body, CallRef, Effect, Entry, LogHeader, Recipe, SegmentId, Strategy};
 use crate::error::LogError;
 use crate::line::{content_slice, encode_entry};
 
@@ -225,15 +225,23 @@ impl Log {
             _ if e.seg != seg => {
                 return Err(invalid(format!("entry must stay in segment {seg}")));
             }
-            Body::AssistantMessage { from, .. } => match self.get(*from).map(|f| &f.body) {
-                Some(Body::ModelResponse { .. }) => {}
-                _ => {
+            Body::AssistantMessage { from, .. } => {
+                if !matches!(
+                    self.get(*from).map(|f| &f.body),
+                    Some(Body::ModelResponse { .. })
+                ) {
                     return Err(invalid(format!(
                         "`from` {} is not a model.response",
                         from.0
                     )));
                 }
-            },
+                if self.compaction_of(*from).is_some() {
+                    return Err(invalid(format!(
+                        "`from` {} answers a compaction call: it goes into a seed",
+                        from.0
+                    )));
+                }
+            }
             Body::SegmentSeed { from: Some(f), .. } => {
                 if !matches!(
                     self.get(*f).map(|x| &x.body),
@@ -247,7 +255,14 @@ impl Log {
                     })?;
                 }
             }
-            Body::ModelRequest { recipe, sha256 } => {
+            Body::ModelRequest {
+                recipe,
+                sha256,
+                compaction,
+            } => {
+                if *compaction == Some(Strategy::Deterministic) {
+                    return Err(invalid("a deterministic seed makes no model call".into()));
+                }
                 match self.get(recipe.prefix).map(|p| &p.body) {
                     Some(Body::SessionPrefix { .. }) => {}
                     _ => {
@@ -267,6 +282,20 @@ impl Log {
             _ => {}
         }
         Ok(())
+    }
+
+    /// The compactor of the call `response` answers, if that call is a compaction call: the `model.request` nearest
+    /// before it.
+    pub(crate) fn compaction_of(&self, response: Seq) -> Option<Strategy> {
+        let n = usize::try_from(response.0).ok()?;
+        self.entries
+            .get(..n.saturating_sub(1))?
+            .iter()
+            .rev()
+            .find_map(|e| match &e.body {
+                Body::ModelRequest { compaction, .. } => Some(*compaction),
+                _ => None,
+            })?
     }
 
     fn expect_slice(&self, seq: Seq) -> Result<(), String> {
@@ -394,7 +423,7 @@ impl Log {
         assemble: &dyn Fn(&RequestParts<'_>) -> Vec<u8>,
     ) -> Result<(), LogError> {
         for e in &self.entries {
-            if let Body::ModelRequest { recipe, sha256 } = &e.body {
+            if let Body::ModelRequest { recipe, sha256, .. } = &e.body {
                 let actual = sha256_hex(&assemble(&self.request_parts(recipe)?));
                 if &actual != sha256 {
                     return Err(LogError::HashMismatch {
@@ -425,9 +454,20 @@ impl Log {
                     last_request = Some(e.seq);
                     answered = false;
                 }
-                // A `segment.start` comes only at a boundary: one after an unanswered request ends a compaction
-                // call, whose answer went into the seed instead of a `message.assistant`.
-                Body::ModelFailure { .. } | Body::SegmentStart { .. } => answered = true,
+                Body::ModelFailure { .. } => answered = true,
+                // A compaction call's answer goes into the seed instead of a `message.assistant`: a `segment.start`
+                // whose seed copies a response after the request answers it. Any other start answers nothing.
+                Body::SegmentStart { seed, .. } => {
+                    if let Some(r) = last_request
+                        && seed.iter().any(|s| {
+                            matches!(self.get(*s).map(|x| &x.body),
+                                Some(Body::SegmentSeed { from: Some(f), .. })
+                                    if *f > r && matches!(self.get(*f).map(|x| &x.body), Some(Body::ModelResponse { .. })))
+                        })
+                    {
+                        answered = true;
+                    }
+                }
                 Body::AssistantMessage { from, calls: asked } => {
                     if last_request.is_some_and(|r| *from > r) {
                         answered = true;

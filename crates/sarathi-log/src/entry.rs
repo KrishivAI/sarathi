@@ -146,6 +146,9 @@ pub enum Body {
         recipe: Recipe,
         /// Lower-case hex SHA-256 of the body as sent.
         sha256: String,
+        /// Set on a compaction call: who summarizes. Its answer goes into the next segment's seed, never into a
+        /// `message.assistant`.
+        compaction: Option<Strategy>,
     },
     /// `model.response`: a call's answer as received.
     ModelResponse {
