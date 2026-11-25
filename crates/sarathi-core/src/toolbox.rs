@@ -15,13 +15,56 @@
 //! keeps the model's input; the rewritten input that ran is not recorded. A toolbox has no stop signal: an
 //! interrupted side-effecting call runs until the driver's grace period ends and is then dropped.
 
+use std::sync::{Arc, Mutex as StdMutex, MutexGuard, PoisonError};
+
 use sarathi_protocol::{CallId, RawJson, ToolOutput};
 use sarathi_tools::{Hooks, Policy, ToolSpec, Toolbox, Verdict};
 use serde_json::Value;
 use tokio::sync::Mutex;
 
+use crate::core::Completion;
 use crate::driver::{BoxFuture, StopSignal, Tools};
+use crate::gate::{Criterion, EvidenceKinds, Gate};
 use crate::profile::{Effect, ToolDef};
+
+/// The name of the tool [`ToolboxTools::with_gate`] adds: the model states the criteria a finish is checked against.
+pub const PLAN_TOOL: &str = "plan";
+
+/// The completion gate shared by the tools that feed it and the core that asks it ([`Completion`]).
+#[derive(Debug, Clone)]
+pub struct SharedGate(Arc<StdMutex<Gate>>);
+
+impl SharedGate {
+    fn lock(&self) -> MutexGuard<'_, Gate> {
+        self.0.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// The gate's verdict now.
+    #[must_use]
+    pub fn verdict(&self) -> crate::gate::Verdict {
+        self.lock().check()
+    }
+}
+
+impl Completion for SharedGate {
+    fn check(&self) -> Option<String> {
+        let v = self.lock().check();
+        (!v.is_accepted()).then(|| v.to_string())
+    }
+}
+
+/// What the `plan` tool takes: criteria, each with an id, the words, and the evidence kind that shows it.
+#[derive(serde::Deserialize)]
+struct PlanInput {
+    criteria: Vec<PlanCriterion>,
+}
+
+#[derive(serde::Deserialize)]
+struct PlanCriterion {
+    id: String,
+    text: String,
+    kind: String,
+}
 
 /// A [`Toolbox`] with its policy and hooks, as the driver's [`Tools`]. Calls are made one at a time.
 pub struct ToolboxTools<T: Toolbox> {
@@ -29,6 +72,7 @@ pub struct ToolboxTools<T: Toolbox> {
     specs: Vec<ToolSpec>,
     policy: Policy,
     hooks: Hooks,
+    gate: Option<SharedGate>,
 }
 
 impl<T: Toolbox> std::fmt::Debug for ToolboxTools<T> {
@@ -62,7 +106,71 @@ impl<T: Toolbox> ToolboxTools<T> {
             specs,
             policy,
             hooks,
+            gate: None,
         }
+    }
+
+    /// The same tools feeding a completion gate for the evidence `kinds` the host offers (the kinds its tools name
+    /// with [`ToolSpec::evidence`]), and a `plan` tool ([`PLAN_TOOL`], read-only) through which the model states the
+    /// criteria a finish is checked against. Call before [`ToolboxTools::defs`]: the plan tool is part of the
+    /// session's fixed tool list.
+    ///
+    /// The gate sees every call that ran: a tool that is not read-only counts as an edit (failed or not, since a
+    /// failed write may have changed something), and a successful result of a tool with an evidence kind is evidence
+    /// of that kind for every criterion asking for it, fresh when no edit follows. Pass the returned [`SharedGate`]
+    /// to the driver ([`crate::driver::DriverConfig::with_completion`]): a model that stops without a plan or
+    /// without fresh evidence is told what is missing and goes on, up to [`crate::MAX_COMPLETION_REFUSALS`] times a
+    /// turn. The gate is memory only: a resumed session starts with no plan and the model is asked for one.
+    #[must_use]
+    pub fn with_gate(mut self, kinds: EvidenceKinds) -> (Self, SharedGate) {
+        let gate = SharedGate(Arc::new(StdMutex::new(Gate::new(kinds.clone()))));
+        let kinds_text = kinds.iter().collect::<Vec<_>>().join(", ");
+        self.specs.push(
+            ToolSpec::new(
+                PLAN_TOOL,
+                format!(
+                    "State what must hold before you finish, as criteria with an id, the words, and the kind of \
+                     evidence that shows it (kinds: {kinds_text}). Evidence counts only when gathered after your \
+                     last edit. Stating a plan again replaces the old one."
+                ),
+                serde_json::json!({
+                    "type": "object",
+                    "properties": {"criteria": {"type": "array", "items": {
+                        "type": "object",
+                        "properties": {
+                            "id": {"type": "string"},
+                            "text": {"type": "string"},
+                            "kind": {"type": "string"}
+                        },
+                        "required": ["id", "text", "kind"]
+                    }}},
+                    "required": ["criteria"]
+                }),
+            )
+            .read_only(),
+        );
+        self.gate = Some(gate.clone());
+        (self, gate)
+    }
+
+    /// Runs the `plan` tool: `Ok` is the note the model reads, `Err` why the plan was not taken.
+    fn plan(gate: &SharedGate, input: &Value) -> Result<String, String> {
+        let plan: PlanInput = serde_json::from_value(input.clone())
+            .map_err(|e| format!("the plan needs `criteria` (id, text, kind): {e}"))?;
+        let criteria: Vec<Criterion> = plan
+            .criteria
+            .into_iter()
+            .map(|c| Criterion {
+                id: c.id.into(),
+                text: c.text.into(),
+                kind: c.kind.into(),
+            })
+            .collect();
+        let n = criteria.len();
+        gate.lock().set_plan(criteria).map_err(|e| e.to_string())?;
+        Ok(format!(
+            "Plan taken: {n} criteria. Gather the evidence after your last edit, then finish."
+        ))
     }
 
     /// The tools as the driver's config lists them ([`crate::driver::DriverConfig::new`]): a read-only tool reads,
@@ -143,6 +251,7 @@ impl<T: Toolbox> Tools for ToolboxTools<T> {
             let Some(spec) = self.spec(&tool) else {
                 return refused(format!("`{tool}` is not a tool of this session"));
             };
+            let planning = self.gate.is_some() && tool.as_ref() == PLAN_TOOL;
             let Ok(asked) = serde_json::from_str::<Value>(input.as_str()) else {
                 return refused(format!("the input of `{tool}` is not JSON"));
             };
@@ -165,11 +274,24 @@ impl<T: Toolbox> Tools for ToolboxTools<T> {
                     }
                 }
             }
-            let (text, is_error) = match toolbox.call(&tool, &input).await {
+            let result = match &self.gate {
+                Some(gate) if planning => Self::plan(gate, &input),
+                _ => toolbox.call(&tool, &input).await,
+            };
+            let (text, is_error) = match result {
                 Ok(t) => (t, false),
                 Err(t) => (t, true),
             };
             drop(toolbox);
+            if let (Some(gate), false) = (&self.gate, planning) {
+                let mut g = gate.lock();
+                if !spec.read_only {
+                    g.record_edit();
+                }
+                if let (Some(kind), false) = (&spec.evidence, is_error) {
+                    g.record_evidence_of_kind(kind, &text);
+                }
+            }
             let text = self
                 .hooks
                 .run_post(&call, &tool, &input, text, is_error)

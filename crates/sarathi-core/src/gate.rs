@@ -271,6 +271,25 @@ impl Gate {
         Ok(())
     }
 
+    /// Evidence of `kind` for every criterion that asked for that kind, gathered now. For a host tool that does not
+    /// know which criterion it serves (a `look` shows the whole page): the model's plan says what each criterion
+    /// needs, and one fresh result of the kind serves them all. Returns how many criteria it served (zero when the
+    /// plan has none of that kind; nothing is recorded then).
+    pub fn record_evidence_of_kind(&mut self, kind: &str, summary: &str) -> usize {
+        let mut served = 0;
+        for c in self.criteria.iter().filter(|c| &*c.kind == kind) {
+            self.evidence.insert(
+                c.id.clone(),
+                Evidence {
+                    at: self.edits,
+                    summary: summary.into(),
+                },
+            );
+            served += 1;
+        }
+        served
+    }
+
     /// The summary of the evidence held for `id`, fresh or not.
     #[must_use]
     pub fn evidence_for(&self, id: &str) -> Option<&str> {
@@ -334,6 +353,17 @@ mod tests {
         g.record_evidence("a", "look", "seen").unwrap();
         g.record_evidence(" a ", "look", "seen again").unwrap();
         assert!(g.check().is_accepted());
+    }
+
+    #[test]
+    fn evidence_of_a_kind_serves_every_criterion_asking_for_it_and_none_else() {
+        let mut g = gate();
+        assert_eq!(g.record_evidence_of_kind("look", "seen"), 1);
+        assert_eq!(g.record_evidence_of_kind("render", "x"), 0);
+        assert_eq!(g.evidence_for("hero"), Some("seen"));
+        assert_eq!(g.evidence_for("count"), None);
+        g.record_edit();
+        assert!(matches!(g.check(), Verdict::Refused(u) if u.len() == 2));
     }
 
     #[test]
