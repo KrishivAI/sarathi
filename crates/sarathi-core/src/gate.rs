@@ -10,8 +10,6 @@
 use std::collections::BTreeMap;
 use std::fmt;
 
-use thiserror::Error;
-
 /// The evidence kinds a host can supply, by name.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EvidenceKinds(Vec<Box<str>>);
@@ -57,22 +55,16 @@ pub struct Criterion {
 }
 
 /// Why a plan was not accepted.
-#[derive(Debug, Clone, PartialEq, Eq, Error)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum PlanError {
     /// The plan has no criteria.
-    #[error("a plan needs at least one criterion")]
     Empty,
     /// Two criteria share an id.
-    #[error("criterion id `{0}` is used twice")]
     DuplicateId(Box<str>),
     /// A criterion has an empty id or text.
-    #[error("a criterion needs a non-empty id and text")]
     Blank,
     /// A criterion names an evidence kind the host does not offer.
-    #[error(
-        "criterion `{id}` needs evidence of kind `{kind}`, which this host does not offer (offered: {offered})"
-    )]
     UnknownKind {
         /// The criterion.
         id: Box<str>,
@@ -82,6 +74,22 @@ pub enum PlanError {
         offered: Box<str>,
     },
 }
+
+impl fmt::Display for PlanError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Empty => f.write_str("a plan needs at least one criterion"),
+            Self::DuplicateId(id) => write!(f, "criterion id `{id}` is used twice"),
+            Self::Blank => f.write_str("a criterion needs a non-empty id and text"),
+            Self::UnknownKind { id, kind, offered } => write!(
+                f,
+                "criterion `{id}` needs evidence of kind `{kind}`, which this host does not offer (offered: {offered})"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for PlanError {}
 
 /// Why one criterion is not met.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

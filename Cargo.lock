@@ -9,9 +9,6 @@ version = "0.0.0"
 [[package]]
 name = "sarathi-core"
 version = "0.0.0"
-dependencies = [
- "thiserror",
-]
 
 [[package]]
 name = "sarathi-eval"
