@@ -463,19 +463,37 @@ pub(crate) fn error_envelope(body: &[u8]) -> Option<super::error::TranslateError
         error: Option<Inner>,
     }
     #[derive(Deserialize)]
-    struct Inner {
-        #[serde(default)]
-        code: Option<serde_json::Value>,
+    #[serde(untagged)]
+    enum Inner {
+        Object {
+            #[serde(default)]
+            code: Option<serde_json::Value>,
+        },
+        // `{"error":"upstream failed"}`: a provider error with no code.
+        Message(#[expect(dead_code, reason = "read only to accept the shape")] String),
     }
     let e: Envelope = serde_json::from_slice(body).ok()?;
     if e.choices.is_some() {
         return None;
     }
-    let code = e.error?.code;
+    let code = match e.error? {
+        Inner::Object { code } => code,
+        Inner::Message(_) => None,
+    };
     let named = |name: &str| {
         let n = name.to_ascii_lowercase();
-        if n.contains("rate") {
+        if ["rate_limit", "ratelimit", "rate-limit", "too_many_requests"]
+            .iter()
+            .any(|w| n.contains(w))
+        {
             429
+        } else if ["invalid_api_key", "unauthorized", "authentication"]
+            .iter()
+            .any(|w| n.contains(w))
+        {
+            401
+        } else if n.contains("not_found") {
+            404
         } else if ["server", "overload", "unavailable", "timeout", "upstream"]
             .iter()
             .any(|w| n.contains(w))
@@ -714,6 +732,24 @@ mod tests {
             (502, true)
         );
         assert_eq!(provider(br#"{"error":{"message":"x"}}"#), (502, true));
+        assert_eq!(provider(br#"{"error":"upstream failed"}"#), (502, true));
+        assert_eq!(
+            provider(br#"{"error":{"message":"x","code":"rate_limit_exceeded"}}"#),
+            (429, true)
+        );
+        // A code that merely contains "rate" is not a rate limit.
+        assert_eq!(
+            provider(br#"{"error":{"message":"x","code":"content_moderated"}}"#),
+            (400, false)
+        );
+        assert_eq!(
+            provider(br#"{"error":{"message":"x","code":"invalid_api_key"}}"#),
+            (401, false)
+        );
+        assert_eq!(
+            provider(br#"{"error":{"message":"x","code":"model_not_found"}}"#),
+            (404, false)
+        );
         assert!(error_envelope(br#"{"choices":[],"error":null}"#).is_none());
         assert!(error_envelope(b"not json").is_none());
     }

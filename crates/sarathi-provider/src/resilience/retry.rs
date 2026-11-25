@@ -142,7 +142,8 @@ fn spread(d: Duration) -> Duration {
     z ^= z >> 31;
     // 1024 steps between one half and the whole.
     let step = u32::try_from(z % 1025).unwrap_or(1024);
-    d / 2 + (d / 2) * step / 1024
+    // `d / 2 / 1024 * step` is at most `d / 2`, so nothing overflows, even for `Duration::MAX`.
+    (d / 2).saturating_add((d / 2 / 1024).saturating_mul(step))
 }
 
 #[cfg(test)]
@@ -227,6 +228,20 @@ mod tests {
                 d >= Duration::from_millis(500) && d <= Duration::from_millis(1000),
                 "{d:?}"
             );
+        }
+    }
+
+    #[test]
+    fn jitter_does_not_overflow_on_the_longest_delays() {
+        let p = RetryPolicy {
+            max_attempts: 40,
+            base_delay: Duration::MAX,
+            max_delay: Duration::MAX,
+            ..RetryPolicy::default()
+        };
+        for attempt in [1, 2, 39] {
+            let d = p.delay(attempt, &err(ErrorKind::Upstream)).unwrap();
+            assert!(d >= Duration::MAX / 2, "{d:?}");
         }
     }
 

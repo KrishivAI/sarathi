@@ -137,13 +137,25 @@ fn rank(kind: ErrorKind) -> u8 {
     }
 }
 
-/// Whether the next slot may succeed where this one failed. Not when the request itself is at fault (it is the same
-/// for every slot), when the history check failed (a Sarathi bug, never hidden by trying elsewhere), or when the
-/// budget is spent.
+/// Whether the next slot may succeed where this one failed: a failure of this slot's key, model, provider or
+/// connection. Every other kind stops the chain: the request itself is at fault (it is the same for every slot), the
+/// window is too small (the run loop compacts and tries again), the history check failed (a Sarathi bug, never hidden
+/// by trying elsewhere), the budget is spent, the call was cancelled, or the kind is one a provider call does not
+/// produce (a newer version's kinds included), so a second paid call is never made for it.
 fn fails_over(kind: ErrorKind) -> bool {
-    !matches!(
+    matches!(
         kind,
-        ErrorKind::InvalidRequest | ErrorKind::HistoryMismatch | ErrorKind::BudgetExceeded
+        ErrorKind::Auth
+            | ErrorKind::Permission
+            | ErrorKind::NotFound
+            | ErrorKind::RateLimited
+            | ErrorKind::Upstream
+            | ErrorKind::Network
+            | ErrorKind::Timeout
+            | ErrorKind::Malformed
+            | ErrorKind::Refusal
+            | ErrorKind::Unassemblable
+            | ErrorKind::CircuitOpen
     )
 }
 
@@ -399,6 +411,40 @@ mod tests {
         assert_eq!(e.error().message, "b failed");
         let err: Error = e.into();
         assert_eq!(err.message, "b failed (3 tried)");
+    }
+
+    #[test]
+    fn only_slot_failures_fail_over_and_every_kind_has_a_rank() {
+        let over: Vec<_> = ErrorKind::ALL
+            .iter()
+            .copied()
+            .filter(|k| fails_over(*k))
+            .collect();
+        assert_eq!(
+            over,
+            [
+                ErrorKind::Auth,
+                ErrorKind::Permission,
+                ErrorKind::NotFound,
+                ErrorKind::RateLimited,
+                ErrorKind::Upstream,
+                ErrorKind::Network,
+                ErrorKind::Timeout,
+                ErrorKind::Malformed,
+                ErrorKind::Refusal,
+                ErrorKind::Unassemblable,
+                ErrorKind::CircuitOpen,
+            ]
+        );
+        assert!(!fails_over(ErrorKind::Unknown));
+        assert!(!fails_over(ErrorKind::ContextOverflow));
+        assert!(!fails_over(ErrorKind::Cancelled));
+        // A kind a provider call does not produce ranks after every kind it does.
+        assert_eq!(rank(ErrorKind::Internal), 14);
+        assert!(
+            ErrorKind::ALL[..15].iter().all(|k| rank(*k) < 14),
+            "provider kinds rank below 14"
+        );
     }
 
     #[test]
