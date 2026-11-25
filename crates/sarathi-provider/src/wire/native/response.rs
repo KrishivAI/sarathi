@@ -134,7 +134,47 @@ struct Top<'a> {
     #[serde(default, borrow)]
     stop_details: Option<&'a RawValue>,
     #[serde(default)]
-    usage: Option<Usage>,
+    usage: Option<WireUsage>,
+}
+
+/// `usage` as sent: the counts, and with server compaction the `iterations` they leave out.
+#[derive(Deserialize)]
+struct WireUsage {
+    #[serde(flatten)]
+    counts: Usage,
+    #[serde(default)]
+    iterations: Option<Vec<Iteration>>,
+}
+
+/// One sampling iteration of `usage.iterations`. Missing and `null` counts are 0.
+#[derive(Deserialize)]
+struct Iteration {
+    #[serde(rename = "type", default)]
+    kind: Option<String>,
+    #[serde(flatten)]
+    counts: Usage,
+}
+
+impl WireUsage {
+    /// The billed counts. The top-level counts leave out compaction iterations (an answer that is only a compaction
+    /// reports 0), and the billed total is the sum over all iterations, so each compaction iteration is added to
+    /// them. Other iterations are already in the top-level counts.
+    fn billed(self) -> Usage {
+        let mut u = self.counts;
+        for it in self.iterations.unwrap_or_default() {
+            if it.kind.as_deref() == Some("compaction") {
+                u.input_tokens = u.input_tokens.saturating_add(it.counts.input_tokens);
+                u.output_tokens = u.output_tokens.saturating_add(it.counts.output_tokens);
+                u.cache_creation_input_tokens = u
+                    .cache_creation_input_tokens
+                    .saturating_add(it.counts.cache_creation_input_tokens);
+                u.cache_read_input_tokens = u
+                    .cache_read_input_tokens
+                    .saturating_add(it.counts.cache_read_input_tokens);
+            }
+        }
+        u
+    }
 }
 
 #[derive(Deserialize)]
@@ -191,7 +231,7 @@ pub fn parse(raw: Bytes) -> Result<MessagesResponse, NativeError> {
             .map(|d| RawJson::from_text(d.get()))
             .transpose()
             .map_err(|e| NativeError::Malformed(e.to_string()))?,
-        usage: top.usage.unwrap_or_default(),
+        usage: top.usage.map(WireUsage::billed).unwrap_or_default(),
         blocks,
     };
     Ok(MessagesResponse {
@@ -355,6 +395,39 @@ mod tests {
             r#"{"category":"cyber"}"#
         );
         assert_eq!(r.view.usage, Usage::default());
+    }
+
+    #[test]
+    fn a_compaction_only_answer_is_billed_from_its_iteration() {
+        let r = parse(Bytes::from_static(
+            br#"{"content":[{"type":"compaction","content":"s"}],"stop_reason":"compaction","usage":{"input_tokens":0,"output_tokens":0,"iterations":[{"type":"compaction","input_tokens":144,"output_tokens":276}]}}"#,
+        ))
+        .unwrap();
+        assert_eq!(
+            r.view.usage,
+            Usage {
+                input_tokens: 144,
+                output_tokens: 276,
+                ..Usage::default()
+            }
+        );
+    }
+
+    #[test]
+    fn a_compaction_iteration_is_added_to_the_top_level_counts_once() {
+        let r = parse(Bytes::from_static(
+            br#"{"content":[],"stop_reason":"end_turn","usage":{"input_tokens":23000,"output_tokens":1000,"cache_read_input_tokens":7,"iterations":[{"type":"compaction","input_tokens":180000,"output_tokens":3500},{"type":"message","input_tokens":23000,"output_tokens":1000},{"type":"future","input_tokens":null}]}}"#,
+        ))
+        .unwrap();
+        assert_eq!(
+            r.view.usage,
+            Usage {
+                input_tokens: 203_000,
+                output_tokens: 4_500,
+                cache_read_input_tokens: 7,
+                ..Usage::default()
+            }
+        );
     }
 
     #[test]
