@@ -1,0 +1,6 @@
+# Synthetic: written from the API docs, not recorded; a recorded answer replaces it.
+source = "synthetic"
+date = "2026-11-24"
+model = "claude-opus-5-5"
+docs = "https://docs.claude.com/en/docs/build-with-claude/streaming"
+hazard = "a thinking block with only a signature_delta, and a start-only server-tool result kept as started"

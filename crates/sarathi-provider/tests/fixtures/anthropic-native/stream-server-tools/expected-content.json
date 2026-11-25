@@ -1,0 +1,1 @@
+[{"type":"redacted_thinking","data":"EmwKAhgBEgy3\/x"},{"type":"server_tool_use","id":"srvtoolu_01","name":"web_search","input":{"query": "sky"}},{"type":"text","text":"blue","citations":[{"type":"char_location","cited_text":"The sky is blue.","document_index":0,"start_char_index":0,"end_char_index":16}]}]

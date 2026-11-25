@@ -14,15 +14,21 @@ publish = false
 # Dependencies: one table, `default-features = false`, exact pins for HTTP and MCP crates.
 [workspace.dependencies]
 sarathi-protocol = { path = "crates/sarathi-protocol" }
+async-stream = { version = "=0.3.6", default-features = false }
+bytes = { version = "1.12", default-features = false, features = ["std"] }
+futures = { version = "0.3.34", default-features = false, features = ["std"] }
+# HTTP: exact pin, rustls only (no OpenSSL), redirects not followed (the client sets the policy).
+reqwest = { version = "=0.13.5", default-features = false, features = ["stream", "rustls"] }
 sarathi-log = { path = "crates/sarathi-log" }
 sha2 = { version = "0.11", default-features = false }
-tokio = { version = "1.53", default-features = false }
 uuid = { version = "1.28", default-features = false, features = ["std"] }
-# Tests only.
-tempfile = { version = "3.27", default-features = false }
 serde = { version = "1.0.229", default-features = false, features = ["std", "derive"] }
 serde_json = { version = "1.0.154", default-features = false, features = ["std"] }
 thiserror = { version = "2.0.21", default-features = false, features = ["std"] }
+tokio = { version = "1.53", default-features = false }
+# Tests only.
+proptest = { version = "1.9", default-features = false, features = ["std"] }
+tempfile = { version = "3.27", default-features = false }
 
 [workspace.lints.rust]
 unsafe_code = "forbid"

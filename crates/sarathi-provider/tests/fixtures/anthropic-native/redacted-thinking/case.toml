@@ -1,0 +1,6 @@
+# Synthetic: written from the API docs, not recorded; a recorded answer replaces it.
+source = "synthetic"
+date = "2026-11-24"
+model = "claude-opus-5-5"
+docs = "https://docs.claude.com/en/api/messages"
+hazard = "redacted_thinking with opaque data"
