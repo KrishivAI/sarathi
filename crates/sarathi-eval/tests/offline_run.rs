@@ -42,6 +42,7 @@ fn once() -> Result<(String, String), String> {
             text: "t".into(),
             allowed_models: vec!["new".into()],
             acceptance: "a".into(),
+            fault: None,
         })
         .collect();
     let h = Scripted;
