@@ -69,13 +69,21 @@ async fn run(
     page: &Page,
     replies: Vec<Reply>,
 ) -> (sarathi_log::Log, Scripted, Outcome, SharedGate) {
+    run_with_steps(page, replies, 20).await
+}
+
+async fn run_with_steps(
+    page: &Page,
+    replies: Vec<Reply>,
+    max_steps: u32,
+) -> (sarathi_log::Log, Scripted, Outcome, SharedGate) {
     let (tools, gate) =
         ToolboxTools::new(page.clone(), Policy::new(Mode::AcceptEdits), Hooks::new())
             .with_gate(EvidenceKinds::new(["look"]));
     let defs = tools.defs().unwrap();
     let model = Scripted::new(replies);
     let config = DriverConfig::new(ModelProfile::native(), defs, "You are a test.")
-        .with_limits(limits(20))
+        .with_limits(limits(max_steps))
         .with_completion(Arc::new(gate.clone()));
     let (mut d, _) = Driver::new(
         config,
@@ -180,6 +188,16 @@ async fn a_model_that_keeps_finishing_is_stopped_after_the_cap() {
     assert_eq!(outcome, Outcome::RanOut);
     assert_eq!(model.left(), 0);
     assert_eq!(steers(&log).len(), MAX_COMPLETION_REFUSALS as usize);
+}
+
+#[tokio::test]
+async fn a_refused_finish_at_the_step_cap_ends_ran_out_not_finished() {
+    let page = Page::default();
+    let (log, model, outcome, gate) = run_with_steps(&page, vec![finish()], 1).await;
+    assert_eq!(outcome, Outcome::RanOut);
+    assert_eq!(model.left(), 0);
+    assert!(steers(&log).is_empty(), "no call is left to answer a steer");
+    assert!(!gate.verdict().is_accepted());
 }
 
 #[tokio::test]

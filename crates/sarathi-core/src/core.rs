@@ -1113,7 +1113,7 @@ impl Core {
         if let Some(text) = self.completion_refusal() {
             let Some(t) = self.turn.as_mut() else { return };
             t.refused += 1;
-            if t.refused > MAX_COMPLETION_REFUSALS {
+            if t.refused > MAX_COMPLETION_REFUSALS || self.at_cap() {
                 self.end(out, Outcome::RanOut, reply);
                 return;
             }
@@ -1132,19 +1132,27 @@ impl Core {
         }
     }
 
-    /// The host's refusal of this finish, unless the turn is stopping anyway (shutdown, step or spend cap).
+    /// The host's refusal of this finish, unless the turn is shutting down.
+    ///
+    /// At the step or spend cap the refusal still stands, but the model cannot be sent back: [`Core::finish`]
+    /// ends the turn [`Outcome::RanOut`] then, so an unverified finish is not reported as done.
     fn completion_refusal(&self) -> Option<String> {
         let t = self.turn.as_ref()?;
-        let stopping = t.shutdown
-            || t.steps >= self.limits.max_steps
-            || self
-                .limits
-                .max_cost_micros
-                .is_some_and(|cap| t.spent_micros >= cap);
-        if stopping {
+        if t.shutdown {
             return None;
         }
         self.completion.as_ref()?.check()
+    }
+
+    /// Whether the turn may not make another model call (step or spend cap).
+    fn at_cap(&self) -> bool {
+        self.turn.as_ref().is_some_and(|t| {
+            t.steps >= self.limits.max_steps
+                || self
+                    .limits
+                    .max_cost_micros
+                    .is_some_and(|cap| t.spent_micros >= cap)
+        })
     }
 
     fn set_tools(&mut self, calls: VecDeque<Call>) {
