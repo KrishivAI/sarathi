@@ -13,7 +13,7 @@ struct Scripted;
 impl Harness for Scripted {
     fn run(&self, b: &Brief, _m: &str, run: u32) -> Result<HarnessOutput, HarnessError> {
         if b.id == "b2" && run == 1 {
-            return Err(HarnessError("cut stream".into()));
+            return Err(HarnessError::new("cut stream"));
         }
         Ok(HarnessOutput {
             artifact: "ok".into(),
