@@ -150,6 +150,7 @@ fn keep(turns: usize) -> Keep {
     Keep {
         turns,
         head: KEEP_HEAD,
+        last: true,
     }
 }
 
@@ -343,6 +344,119 @@ fn shrink_to_fit_keeps_the_most_turns_that_fit() {
     ));
     assert_eq!(tries, 6);
     assert!(t.elapsed() < std::time::Duration::from_secs(5));
+}
+
+/// Between turns the last turn is complete: when it alone does not fit, it is dropped too, so the session goes on
+/// with the first message, the note and the next user message. While a turn is open it is never dropped.
+#[test]
+fn between_turns_a_last_turn_too_large_is_dropped_but_never_an_open_one() {
+    let mut s = Script::new();
+    let t1 = s.turn(1);
+    let t2 = s.turn(2);
+    let big = s.user(&"y".repeat(8000));
+    s.push(Body::TurnEnd {
+        outcome: "failed".into(),
+    });
+    assert!(!s.log.resume().in_turn);
+    let small = |l: &Log| !l.projection().messages.contains(&big);
+
+    // Keeping the last turn is tried first: it wins whenever it fits.
+    let seed = shrink_to_fit(&s.log, 4, 1, |_| true).unwrap();
+    assert!(seed.kept_last);
+    assert_eq!(
+        seed.kept_turns, 1,
+        "turn 1 is dropped to leave something out"
+    );
+
+    // It does not fit: the last turn goes, the earlier ones stay as far as they fit.
+    let seed = shrink_to_fit(&s.log, 4, 1, small).unwrap();
+    assert!(!seed.kept_last);
+    assert_eq!(seed.kept_turns, 2);
+    let mut l = s.log.clone();
+    l.append(l.next_seq(), seed.entries.clone()).unwrap();
+    let p = l.projection().messages;
+    assert!(!p.contains(&big));
+    assert_eq!(
+        p[1], t1[0],
+        "after the note, turn 1 is kept whole, first message included"
+    );
+    assert!(p.contains(&t2[3]));
+    assert!(l.resume().at_boundary());
+    assert!(!l.resume().in_turn);
+
+    // Down to no turn at all: the first message and the note.
+    let seed = shrink_to_fit(&s.log, 4, 1, |l| {
+        small(l) && l.projection().messages.len() <= 2
+    })
+    .unwrap();
+    assert!(!seed.kept_last);
+    assert_eq!(seed.kept_turns, 0);
+    let mut l = s.log.clone();
+    l.append(l.next_seq(), seed.entries.clone()).unwrap();
+    let p = l.projection().messages;
+    assert_eq!(p.len(), 2);
+    assert_eq!(p[0], t1[0]);
+
+    // Asked directly, the same seed comes back; an explicit `last: false` is honoured between turns only.
+    let direct = deterministic_seed(
+        &s.log,
+        Keep {
+            turns: 0,
+            head: KEEP_HEAD,
+            last: false,
+        },
+        1,
+    )
+    .unwrap();
+    assert_eq!(direct, seed);
+
+    // While a turn is open, the current turn stays: dropping it is never tried.
+    let open = &mut s;
+    let u = open.user("task 4");
+    let mut tries = 0;
+    let seed = shrink_to_fit(&open.log, 4, 1, |l| {
+        tries += 1;
+        l.projection().messages.contains(&u)
+    })
+    .unwrap();
+    assert!(seed.kept_last);
+    let in_turn = deterministic_seed(
+        &open.log,
+        Keep {
+            turns: 0,
+            head: KEEP_HEAD,
+            last: false,
+        },
+        1,
+    )
+    .unwrap();
+    assert!(
+        in_turn.kept_last,
+        "an open turn is kept whatever `last` says"
+    );
+    assert!(matches!(
+        shrink_to_fit(&open.log, 4, 1, |l| !l.projection().messages.contains(&u)),
+        Err(ContextError::DoesNotFit)
+    ));
+    assert!(tries > 0);
+}
+
+/// A one-turn session whose first message alone does not fit cannot go on: the first message is always kept.
+#[test]
+fn a_first_message_too_large_still_does_not_fit_between_turns() {
+    let mut s = Script::new();
+    let big = s.user(&"y".repeat(8000));
+    s.push(Body::TurnEnd {
+        outcome: "failed".into(),
+    });
+    assert!(matches!(
+        shrink_to_fit(&s.log, 4, 1, |l| !l.projection().messages.contains(&big)),
+        Err(ContextError::DoesNotFit)
+    ));
+    // Something fits once the last turn is dropped: the first message and the note.
+    let seed = shrink_to_fit(&s.log, 4, 1, |_| true).unwrap();
+    assert!(!seed.kept_last, "keeping the only turn leaves nothing out");
+    assert_eq!(seed.kept_turns, 0);
 }
 
 /// A segment that starts with a server compaction block: the block is the head, kept first.

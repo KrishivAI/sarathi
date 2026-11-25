@@ -290,6 +290,7 @@ pub fn compaction_seed(log: &Log, ts: u64) -> Result<Seed, ContextError> {
     Ok(Seed {
         entries,
         kept_turns: 0,
+        kept_last: false,
         kept_head: false,
     })
 }
