@@ -144,6 +144,7 @@ mod tests {
                 input: 1,
                 output: 1,
                 cached_input: 1,
+                cache_write: None,
             },
         );
         let old = arm_stats(

@@ -179,6 +179,24 @@ pub fn run_briefs(
     k: u32,
     purpose: Purpose,
 ) -> Result<Vec<RunRecord>, RunnerError> {
+    check_plan(briefs, arms, k, purpose)?;
+    Ok(plan(briefs, arms.len(), k)
+        .into_iter()
+        .map(|p| run_one(&briefs[p.brief], &arms[p.arm], acceptance, p.run, purpose))
+        .collect())
+}
+
+/// The checks [`run_briefs`] makes before its first run: something to run, the split guard, plain and unique names,
+/// and every brief allowing every arm's slot.
+///
+/// # Errors
+/// The [`RunnerError`] that [`run_briefs`] would return.
+pub fn check_plan(
+    briefs: &[Brief],
+    arms: &[Arm<'_>],
+    k: u32,
+    purpose: Purpose,
+) -> Result<(), RunnerError> {
     if arms.is_empty() || k == 0 || briefs.is_empty() {
         return Err(RunnerError::Empty);
     }
@@ -204,44 +222,51 @@ pub fn run_briefs(
             }
         }
     }
-    let mut records = Vec::new();
-    for p in plan(briefs, arms.len(), k) {
-        let (brief, arm) = (&briefs[p.brief], &arms[p.arm]);
-        let mut rec = RunRecord {
-            version: RUN_RECORD_VERSION,
-            purpose,
-            brief: brief.id.clone(),
-            arm: arm.name.clone(),
-            slot: arm.slot.clone(),
-            model: arm.model.clone(),
-            run: p.run,
-            accepted: false,
-            valid_ops: 0,
-            total_ops: 0,
-            usage: TokenUsage::default(),
-            steps: 0,
-            wall_ms: 0,
-            error: None,
-        };
-        match arm.harness.run(brief, &arm.model, p.run) {
-            Ok(out) => {
-                rec.accepted = acceptance.accepts(brief, &out);
-                rec.valid_ops = out.valid_ops;
-                rec.total_ops = out.total_ops;
-                rec.usage = out.usage;
-                rec.steps = out.steps;
-                rec.wall_ms = out.wall_ms;
-            }
-            Err(e) => {
-                rec.usage = e.partial.usage;
-                rec.steps = e.partial.steps;
-                rec.wall_ms = e.partial.wall_ms;
-                rec.error = Some(e.message);
-            }
+    Ok(())
+}
+
+/// One run of `brief` on `arm`, as a record: a failing run is a record with `error` set and its partial usage.
+#[must_use]
+pub fn run_one(
+    brief: &Brief,
+    arm: &Arm<'_>,
+    acceptance: &dyn Acceptance,
+    run: u32,
+    purpose: Purpose,
+) -> RunRecord {
+    let mut rec = RunRecord {
+        version: RUN_RECORD_VERSION,
+        purpose,
+        brief: brief.id.clone(),
+        arm: arm.name.clone(),
+        slot: arm.slot.clone(),
+        model: arm.model.clone(),
+        run,
+        accepted: false,
+        valid_ops: 0,
+        total_ops: 0,
+        usage: TokenUsage::default(),
+        steps: 0,
+        wall_ms: 0,
+        error: None,
+    };
+    match arm.harness.run(brief, &arm.model, run) {
+        Ok(out) => {
+            rec.accepted = acceptance.accepts(brief, &out);
+            rec.valid_ops = out.valid_ops;
+            rec.total_ops = out.total_ops;
+            rec.usage = out.usage;
+            rec.steps = out.steps;
+            rec.wall_ms = out.wall_ms;
         }
-        records.push(rec);
+        Err(e) => {
+            rec.usage = e.partial.usage;
+            rec.steps = e.partial.steps;
+            rec.wall_ms = e.partial.wall_ms;
+            rec.error = Some(e.message);
+        }
     }
-    Ok(records)
+    rec
 }
 
 /// An id becomes a directory name, so it must be a single plain path component.
@@ -329,6 +354,7 @@ mod tests {
                             input_tokens: 70,
                             output_tokens: 5,
                             cached_input_tokens: 0,
+                            cache_write_input_tokens: 0,
                         },
                         steps: 3,
                         wall_ms: 40,

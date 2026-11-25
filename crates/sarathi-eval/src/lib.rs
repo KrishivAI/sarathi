@@ -5,6 +5,7 @@
 
 pub mod brief;
 pub mod cassette;
+pub mod config;
 pub mod killline;
 pub mod metrics;
 pub mod report;
