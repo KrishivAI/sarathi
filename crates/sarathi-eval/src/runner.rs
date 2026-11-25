@@ -8,7 +8,8 @@ use std::path::{Path, PathBuf};
 use serde::Serialize;
 
 use crate::brief::{Brief, Split};
-use crate::metrics::{RunRecord, TokenUsage};
+pub use crate::metrics::Purpose;
+use crate::metrics::{RUN_RECORD_VERSION, RunRecord, TokenUsage};
 
 /// What a harness reports for one run of one brief.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -27,10 +28,36 @@ pub struct HarnessOutput {
     pub wall_ms: u64,
 }
 
-/// A harness could not finish a run.
+/// A harness could not finish a run. Whatever the run spent before it failed is reported and billed, so the error
+/// carries it: a failed run is recorded with its real tokens, steps and wall time, never as free and instant.
 #[derive(Debug, thiserror::Error)]
-#[error("{0}")]
-pub struct HarnessError(pub String);
+#[error("{message}")]
+pub struct HarnessError {
+    /// Why the run failed.
+    pub message: String,
+    /// Usage, steps and wall time spent before the failure (`artifact` and the op counts are ignored).
+    pub partial: HarnessOutput,
+}
+
+impl HarnessError {
+    /// A failure that spent nothing the harness could measure.
+    #[must_use]
+    pub fn new(message: impl Into<String>) -> Self {
+        Self {
+            message: message.into(),
+            partial: HarnessOutput::default(),
+        }
+    }
+
+    /// A failure after `partial` usage, steps and wall time were spent.
+    #[must_use]
+    pub fn after(message: impl Into<String>, partial: HarnessOutput) -> Self {
+        Self {
+            message: message.into(),
+            partial,
+        }
+    }
+}
 
 /// An agent harness under measurement.
 pub trait Harness {
@@ -59,15 +86,6 @@ pub struct Arm<'a> {
     pub model: String,
     /// The harness.
     pub harness: &'a dyn Harness,
-}
-
-/// Why briefs are being run. A tuning pass never touches the measurement split.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Purpose {
-    /// Developing against the tuning split.
-    Tune,
-    /// The measurement that decides the kill line.
-    Measure,
 }
 
 /// The runner refused a plan.
@@ -190,6 +208,8 @@ pub fn run_briefs(
     for p in plan(briefs, arms.len(), k) {
         let (brief, arm) = (&briefs[p.brief], &arms[p.arm]);
         let mut rec = RunRecord {
+            version: RUN_RECORD_VERSION,
+            purpose,
             brief: brief.id.clone(),
             arm: arm.name.clone(),
             slot: arm.slot.clone(),
@@ -212,7 +232,12 @@ pub fn run_briefs(
                 rec.steps = out.steps;
                 rec.wall_ms = out.wall_ms;
             }
-            Err(e) => rec.error = Some(e.0),
+            Err(e) => {
+                rec.usage = e.partial.usage;
+                rec.steps = e.partial.steps;
+                rec.wall_ms = e.partial.wall_ms;
+                rec.error = Some(e.message);
+            }
         }
         records.push(rec);
     }
@@ -234,10 +259,12 @@ fn check_component(what: &str, id: &str) -> Result<(), RunnerError> {
     Ok(())
 }
 
-/// Where a record is written: `<root>/<date>/<arm>/<brief>/<run>.json`.
+/// Where a record is written: `<root>/<date>/<purpose>/<arm>/<brief>/<run>.json`, so a tuning pass and the
+/// measurement never share a directory.
 #[must_use]
 pub fn record_path(root: &Path, date: &str, r: &RunRecord) -> PathBuf {
     root.join(date)
+        .join(r.purpose.dir())
         .join(&r.arm)
         .join(&r.brief)
         .join(format!("{}.json", r.run))
@@ -248,7 +275,10 @@ pub fn record_path(root: &Path, date: &str, r: &RunRecord) -> PathBuf {
 /// # Errors
 /// [`RunnerError::Io`] on a failed create or write.
 pub fn write_records(root: &Path, date: &str, records: &[RunRecord]) -> Result<(), RunnerError> {
+    check_component("date", date)?;
     for r in records {
+        check_component("arm name", &r.arm)?;
+        check_component("brief id", &r.brief)?;
         let path = record_path(root, date, r);
         let io = |e: std::io::Error| RunnerError::Io(format!("{}: {e}", path.display()));
         if let Some(dir) = path.parent() {
@@ -280,6 +310,7 @@ mod tests {
             text: "t".into(),
             allowed_models: vec!["new".into()],
             acceptance: "a".into(),
+            fault: None,
         }
     }
 
@@ -291,7 +322,19 @@ mod tests {
         fn run(&self, b: &Brief, _m: &str, run: u32) -> Result<HarnessOutput, HarnessError> {
             self.log.borrow_mut().push((b.id.clone(), run));
             if self.fail_on == Some(b.id.as_str()) {
-                return Err(HarnessError("provider down".into()));
+                return Err(HarnessError::after(
+                    "provider down",
+                    HarnessOutput {
+                        usage: TokenUsage {
+                            input_tokens: 70,
+                            output_tokens: 5,
+                            cached_input_tokens: 0,
+                        },
+                        steps: 3,
+                        wall_ms: 40,
+                        ..HarnessOutput::default()
+                    },
+                ));
             }
             Ok(HarnessOutput {
                 artifact: "ok".into(),
@@ -364,6 +407,8 @@ mod tests {
         let a0 = &recs[0];
         assert_eq!((a0.brief.as_str(), a0.accepted), ("a", false));
         assert_eq!(a0.error.as_deref(), Some("provider down"));
+        // The tokens, steps and time spent before the failure are kept: a failed run is not free.
+        assert_eq!((a0.usage.input_tokens, a0.steps, a0.wall_ms), (70, 3, 40));
         assert!(recs[1].accepted && recs[1].error.is_none());
     }
 
@@ -441,6 +486,35 @@ mod tests {
     }
 
     #[test]
+    fn write_records_refuses_a_date_or_loaded_ids_that_leave_the_directory() {
+        let r = |arm: &str, brief: &str| RunRecord {
+            version: RUN_RECORD_VERSION,
+            purpose: Purpose::Measure,
+            brief: brief.into(),
+            arm: arm.into(),
+            slot: String::new(),
+            model: "m".into(),
+            run: 0,
+            accepted: true,
+            valid_ops: 0,
+            total_ops: 0,
+            usage: TokenUsage::default(),
+            steps: 0,
+            wall_ms: 0,
+            error: None,
+        };
+        let root = std::env::temp_dir().join("sarathi-eval-never-written");
+        for (date, arm, brief) in [("../x", "a", "b"), ("d", "/abs", "b"), ("d", "a", "../b")] {
+            let e = write_records(&root, date, &[r(arm, brief)]).err();
+            assert!(
+                matches!(e, Some(RunnerError::Invalid(_))),
+                "{date} {arm} {brief}"
+            );
+        }
+        assert!(!root.exists());
+    }
+
+    #[test]
     fn empty_plan_is_refused() {
         let bs = [brief("a", Split::Tuning)];
         assert_eq!(
@@ -452,6 +526,8 @@ mod tests {
     #[test]
     fn record_path_layout() {
         let r = RunRecord {
+            version: RUN_RECORD_VERSION,
+            purpose: Purpose::Tune,
             brief: "b1".into(),
             arm: "old".into(),
             slot: String::new(),
@@ -467,7 +543,7 @@ mod tests {
         };
         assert_eq!(
             record_path(Path::new("runs"), "2026-11-28", &r),
-            Path::new("runs/2026-11-28/old/b1/2.json")
+            Path::new("runs/2026-11-28/tune/old/b1/2.json")
         );
     }
 }

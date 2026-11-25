@@ -1,0 +1,1 @@
+{"id":"msg_01","type":"message","role":"assistant","model":"claude-opus-5-5","content":[{"type":"compaction","content":"Summary: the user asked for a plan; step 1 done."},{"type":"text","text":"Continuing."}],"stop_reason":"end_turn","stop_sequence":null,"usage":{"input_tokens":12,"output_tokens":34}}

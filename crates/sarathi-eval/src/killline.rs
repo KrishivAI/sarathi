@@ -4,7 +4,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::metrics::ArmStats;
+use crate::metrics::{ArmStats, Purpose};
 
 /// The tolerances the rule uses.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
@@ -44,12 +44,14 @@ pub struct ArmPair<'a> {
 }
 
 /// How one arm fared.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ArmVerdict {
     /// Model arm name.
     pub name: String,
     /// Strong-model arm.
     pub strong: bool,
+    /// The tolerance this arm was judged by.
+    pub tolerance: Tolerance,
     /// Accept rate within tolerance of the old one (or above it).
     pub accept_ok: bool,
     /// Cost per accepted run within tolerance of the old one (or below it).
@@ -66,7 +68,7 @@ pub enum Outcome {
 }
 
 /// The decision and the reasons for it.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct KillLine {
     /// Pass or fail.
     pub outcome: Outcome,
@@ -101,12 +103,24 @@ pub fn evaluate(pairs: &[ArmPair<'_>]) -> KillLine {
         .map(|p| ArmVerdict {
             name: p.name.to_owned(),
             strong: p.strong,
+            tolerance: p.tolerance,
             accept_ok: accept_ok(p),
             cost_ok: cost_ok(p),
         })
         .collect();
     let mut notes = Vec::new();
     let mut fail = false;
+    for p in pairs {
+        for (which, s) in [("old", p.old), ("new", p.new)] {
+            if s.purpose != Some(Purpose::Measure) {
+                fail = true;
+                notes.push(format!(
+                    "arm `{}` ({which}): the stats are not from a measurement pass; the kill line decides on the measurement only",
+                    p.name
+                ));
+            }
+        }
+    }
     if !arms.iter().any(|a| a.strong) {
         fail = true;
         notes.push("no strong-model arm: the rule cannot be applied".to_owned());
@@ -161,6 +175,8 @@ mod tests {
     fn arm(rate: f64, cost: Option<u64>) -> ArmStats {
         ArmStats {
             arm: "x".into(),
+            purpose: Some(Purpose::Measure),
+            models: vec![],
             runs: 60,
             accepted: 0,
             accept_rate: rate,
@@ -330,5 +346,19 @@ mod tests {
         let o = arm(0.8, Some(100));
         let n = arm(0.8, Some(105));
         assert_eq!(evaluate(&[pair("s", true, &o, &n)]).outcome, Outcome::Pass);
+    }
+
+    #[test]
+    fn stats_from_a_tuning_pass_cannot_decide_the_kill_line() {
+        let o = arm(0.9, Some(100));
+        let mut n = arm(0.9, Some(100));
+        n.purpose = Some(Purpose::Tune);
+        let kl = evaluate(&[pair("s", true, &o, &n)]);
+        assert_eq!(kl.outcome, Outcome::Fail);
+        assert!(
+            kl.notes
+                .iter()
+                .any(|x| x.contains("not from a measurement pass"))
+        );
     }
 }

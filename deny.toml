@@ -22,6 +22,9 @@ allow = [
     "0BSD",
 ]
 confidence-threshold = 0.9
+# webpki-root-certs (CDLA-Permissive-2.0, Mozilla's root store as data) is reached through reqwest's rustls
+# platform verifier (sarathi-provider).
+exceptions = [{ crate = "webpki-root-certs", allow = ["CDLA-Permissive-2.0"] }]
 
 [bans]
 multiple-versions = "warn"

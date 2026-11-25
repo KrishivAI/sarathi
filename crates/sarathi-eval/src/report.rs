@@ -5,7 +5,7 @@
 use serde::Serialize;
 
 use crate::killline::{KillLine, Outcome};
-use crate::metrics::ArmStats;
+use crate::metrics::{ArmStats, PriceTable};
 
 /// Everything a report shows.
 #[derive(Debug, Clone, Serialize)]
@@ -14,6 +14,8 @@ pub struct Report {
     pub date: String,
     /// Stats per arm, in the order given.
     pub arms: Vec<ArmStats>,
+    /// The price table the costs were computed with (micro-dollars per million tokens, by model id).
+    pub prices: PriceTable,
     /// The kill-line decision, when both harnesses were measured.
     pub kill_line: Option<KillLine>,
     /// Entries in `deviations.md`: changes made after the first run (the evaluation protocol).
@@ -64,6 +66,16 @@ pub fn to_markdown(r: &Report) -> String {
         ));
     }
     o.push('\n');
+    for a in &r.arms {
+        o.push_str(&format!("- {} models: {}\n", a.arm, a.models.join(", ")));
+    }
+    for (m, p) in &r.prices.models {
+        o.push_str(&format!(
+            "- price {m}: input {}, output {}, cached input {} (micro-dollars per million tokens)\n",
+            p.input, p.output, p.cached_input
+        ));
+    }
+    o.push('\n');
     match &r.kill_line {
         None => o.push_str("Kill line: not evaluated (one harness measured).\n"),
         Some(k) => {
@@ -75,8 +87,10 @@ pub fn to_markdown(r: &Report) -> String {
             for a in &k.arms {
                 let kind = if a.strong { "strong" } else { "other" };
                 o.push_str(&format!(
-                    "- {} ({kind}): accept {}, cost {}\n",
+                    "- {} ({kind}, tolerance: accept {:.3}, cost {:.1}%): accept {}, cost {}\n",
                     a.name,
+                    a.tolerance.accept,
+                    a.tolerance.cost_fraction * 100.0,
                     if a.accept_ok { "ok" } else { "MISS" },
                     if a.cost_ok { "ok" } else { "MISS" }
                 ));
@@ -104,6 +118,8 @@ mod tests {
             .iter()
             .enumerate()
             .map(|(i, a)| RunRecord {
+                version: crate::metrics::RUN_RECORD_VERSION,
+                purpose: crate::metrics::Purpose::Measure,
                 brief: "b".into(),
                 arm: arm.into(),
                 slot: String::new(),
@@ -152,6 +168,7 @@ mod tests {
         Report {
             date: "2026-11-24".into(),
             arms: vec![old, new],
+            prices,
             kill_line: Some(kl),
             deviations: 0,
         }
