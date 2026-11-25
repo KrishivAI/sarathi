@@ -36,11 +36,13 @@ Invariants checked on every append and on every read (a log read is one a store 
 stays in the current segment unless it is a `segment.start`, which opens the next; references (`from`, `seed`, a
 recipe's `prefix` and `messages`) point back to entries of the right kind; a `segment.start` has a `strategy`
 exactly when its reason is `compaction`; `tool.start` and `tool.result` name a call the open turn's last
-`message.assistant` asked for and has no `tool.result` yet (a started read may start again after a restart);
+`message.assistant` asked for and has no `tool.result` yet (a call may start again: the core, not the log, keeps a
+started write from running twice);
 `turn.end`, a `message.user` that starts a turn and a `model.request` come only after every such call has its
 `tool.result` (an interrupt answers open calls first); `model.request.sha256` is 64 lower-case hex digits. In a
 fork, the entry after the copy of the parent's lines is the fork's `segment.start`, accepted only if the copy hashes
-to `forked_from.sha256`; a fork cut short before it is read as it is.
+to `forked_from.sha256`; a fork cut short before it is an orphan: read as it is, and nothing can be appended to it
+(a torn line in its place is cut without a repair note).
 
 Not checked on append: that a request's recipe rebuilds to its `sha256`. The body is assembled by the provider
 layer, so a log can hold a request whose recipe does not rebuild; hosts that need the guarantee run

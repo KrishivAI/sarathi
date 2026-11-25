@@ -198,12 +198,15 @@ impl Inner {
                     .map_err(|e| LogError::Io(io::Error::other(e)))?,
                 },
             };
+            // The note is checked before it is written. Where no note may stand (in a fork, the place of its
+            // `segment.start`), the tear is cut and nothing is written: a fork cut short is read as it is.
             let mut line = encode_entry(&note)?;
             line.push('\n');
-            file.write_all(line.as_bytes())?;
+            if log.append(note.seq, vec![note]).is_ok() {
+                file.write_all(line.as_bytes())?;
+                len += line.len() as u64;
+            }
             file.sync_data()?;
-            len += line.len() as u64;
-            log.append(note.seq, vec![note])?;
             recovered = Some(Recovered {
                 truncated_bytes: read.torn_bytes,
                 repaired: true,

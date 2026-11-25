@@ -358,3 +358,54 @@ async fn a_fork_cut_short_stays_readable_and_cannot_be_finished_over_a_changed_c
         "{r:?}"
     );
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_fork_torn_at_every_byte_of_its_last_lines_loads_and_reloads() {
+    let root = tempfile::tempdir().unwrap();
+    let (id, _) = written(root.path()).await;
+    let store = JsonlStore::new(root.path());
+    let child = sarathi_log::fork(&store, id, Seq(11), 7).await.unwrap();
+    drop(store);
+    let path = JsonlStore::new(root.path()).log_path(child);
+    let full = std::fs::read(&path).unwrap();
+    // Line starts: the last copied entry (seq 11) and the fork's segment.start (seq 12).
+    let starts: Vec<usize> = std::iter::once(0)
+        .chain(
+            full.iter()
+                .enumerate()
+                .filter(|(_, b)| **b == b'\n')
+                .map(|(i, _)| i + 1),
+        )
+        .collect();
+    for cut in starts[11]..full.len() - 1 {
+        if starts.contains(&cut) {
+            continue;
+        }
+        std::fs::write(&path, &full[..cut]).unwrap();
+        let first = JsonlStore::new(root.path()).load(child).await;
+        let first = first.unwrap_or_else(|e| panic!("cut at {cut}: {e}"));
+        assert!(first.recovered.unwrap().repaired, "cut at {cut}");
+        let again = JsonlStore::new(root.path()).load(child).await;
+        let again = again.unwrap_or_else(|e| panic!("cut at {cut}, reload: {e}"));
+        assert_eq!(again.log, first.log, "cut at {cut}");
+        assert_eq!(again.recovered, None, "cut at {cut}");
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_fork_point_at_the_end_of_the_seq_range_does_not_overflow() {
+    let root = tempfile::tempdir().unwrap();
+    let (id, _) = written(root.path()).await;
+    let store = JsonlStore::new(root.path());
+    let child = sarathi_log::fork(&store, id, Seq(11), 7).await.unwrap();
+    drop(store);
+    let path = JsonlStore::new(root.path()).log_path(child);
+    let text = std::fs::read_to_string(&path).unwrap();
+    std::fs::write(
+        &path,
+        text.replacen("\"seq\":11,", &format!("\"seq\":{},", u64::MAX), 1),
+    )
+    .unwrap();
+    // Whatever it reads as, reading it does not overflow.
+    let _ = JsonlStore::new(root.path()).read(child).await;
+}
