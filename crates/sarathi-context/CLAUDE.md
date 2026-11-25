@@ -14,7 +14,8 @@ Rules:
   (a tool loop needs its thinking back unmodified). Earlier kept turns' assistant slices are re-rendered once
   without thinking, as `segment.seed` entries (each other block's bytes unchanged). The cut never splits a tool
   round: kept turns start at a user message. A segment's head (e.g. a server compaction block) is kept first, and
-  dropped only when nothing with it fits.
+  dropped only when nothing with it fits. Between turns the last turn is complete and may be dropped too
+  (`Keep::last`), after every seed that keeps it fails; an open turn is always kept.
 - A compaction call is a `model.request` marked `compaction`; its answer only ever becomes a seed (the log refuses
   a `message.assistant` from it). On resume the run loop checks `pending_compaction` before anything else: with a
   logged response it calls `compaction_seed` instead of calling again.

@@ -441,6 +441,44 @@ fn between_turns_a_last_turn_too_large_is_dropped_but_never_an_open_one() {
     assert!(tries > 0);
 }
 
+/// With a server compaction block as the head, between turns: an oversized last turn is dropped before the head is.
+#[test]
+fn between_turns_the_head_outlasts_an_oversized_last_turn() {
+    let mut s = Script::new();
+    s.turn(1);
+    s.user("task 2");
+    let block = s.respond(
+        r#"[{"type":"compaction","content":"summary","signature":"sig"}]"#,
+        &[],
+    );
+    let end = s.log.next_seq();
+    s.push(Body::SegmentStart {
+        reason: SegmentReason::Compaction,
+        strategy: Some(Strategy::Server),
+        seed: vec![block],
+        replaces: Some(Seq(1)..end),
+    });
+    let t3 = s.turn(3);
+    let big = s.user(&"y".repeat(8000));
+    s.push(Body::TurnEnd {
+        outcome: "failed".into(),
+    });
+    let seed = shrink_to_fit(&s.log, 4, 1, |l| !l.projection().messages.contains(&big)).unwrap();
+    assert!(
+        seed.kept_head,
+        "the block stays: dropping the last turn is enough"
+    );
+    assert!(!seed.kept_last);
+    assert_eq!(seed.kept_turns, 1);
+    let mut l = s.log.clone();
+    l.append(l.next_seq(), seed.entries).unwrap();
+    let p = l.projection().messages;
+    assert_eq!(p[0], block);
+    assert_eq!(p[2], t3[0]);
+    assert!(!p.contains(&big));
+    assert!(!l.resume().in_turn);
+}
+
 /// A one-turn session whose first message alone does not fit cannot go on: the first message is always kept.
 #[test]
 fn a_first_message_too_large_still_does_not_fit_between_turns() {
