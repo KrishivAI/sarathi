@@ -86,7 +86,9 @@ impl Policy {
     }
 
     /// The verdict for a call of `spec` with `subject`: a matching deny rule, else a matching ask rule, else a
-    /// matching allow rule, else the mode's answer.
+    /// matching allow rule, else the mode's answer. In plan mode a non-read-only tool is refused whatever allows say.
+    /// A session-scope allow (an "allow always" answer) also ends ask rules of any scope: the person answered at that
+    /// prompt. Deny rules are never overridden.
     pub fn evaluate(&self, spec: &ToolSpec, subject: Option<&str>) -> Verdict {
         let mut ask = false;
         let mut allow = false;

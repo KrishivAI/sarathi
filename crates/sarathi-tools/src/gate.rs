@@ -88,7 +88,8 @@ impl Gate {
     }
 
     /// Decides one call. An "allow always" answer adds a session-scope allow for this tool and subject only (deny
-    /// rules still win next time).
+    /// rules still win next time). With no subject the rule covers every later call of the tool, subject or not; a tool
+    /// that can report one should.
     pub async fn check(
         &mut self,
         call: &CallId,

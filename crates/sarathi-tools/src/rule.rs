@@ -124,12 +124,15 @@ impl Rule {
                 glob(pattern, t)
             }
         };
+        if self.literal {
+            // The person approved this exact string.
+            return pattern == subject;
+        }
         let norm = normalise(subject);
         let raw = one(subject);
         match self.effect {
             Effect::Allow => {
-                raw && norm.as_deref().is_none_or(one)
-                    && (self.literal || !subject.contains(is_shell_control))
+                raw && norm.as_deref().is_none_or(one) && !subject.contains(is_shell_control)
             }
             Effect::Ask | Effect::Deny => raw || norm.as_deref().is_some_and(one),
         }
@@ -268,6 +271,11 @@ mod tests {
         assert!(!r.matches("bash", Some("ls a")), "no glob in an exact rule");
         assert!(!r.matches("bash", None));
         assert_eq!(r.as_str(), "bash(ls *)");
+        let p = Rule::exact(Effect::Allow, "look", Some("./src/a"));
+        assert!(
+            p.matches("look", Some("./src/a")),
+            "a non-normal subject is matched as approved"
+        );
         assert!(Rule::exact(Effect::Allow, "bash", None).matches("bash", Some("x")));
     }
 
