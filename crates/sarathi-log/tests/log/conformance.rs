@@ -1,0 +1,582 @@
+// SPDX-License-Identifier: Apache-2.0
+//! Tests every store must pass: run against [`MemoryStore`] and [`JsonlStore`].
+
+use std::sync::Arc;
+
+use sarathi_log::{
+    Body, CallStatus, Durability, Effect, JsonlStore, Log, LogError, LogStore, MemoryStore,
+    ResumeState, SegmentReason, Slice, encode_entry, fork, sha256_hex,
+};
+use sarathi_protocol::Seq;
+
+use crate::common::{Script, assemble, raw};
+
+async fn new_session<S: LogStore>(store: &S) -> Script {
+    let h = store.create(1_764_057_600_000, None).await.unwrap();
+    Script::new(Log::new(h))
+}
+
+async fn append<S: LogStore>(store: &S, s: &Script, entries: Vec<sarathi_log::Entry>) {
+    let expected = entries[0].seq;
+    store
+        .append(
+            s.log.header().session,
+            expected,
+            entries,
+            Durability::Durable,
+        )
+        .await
+        .unwrap();
+}
+
+async fn byte_identity<S: LogStore>(store: &S) {
+    let mut s = new_session(store).await;
+    let mut v = vec![s.prefix()];
+    v.extend(s.tool_turn("make the header blue", "toolu_01"));
+    append(store, &s, v).await;
+    let loaded = store.load(s.log.header().session).await.unwrap();
+    assert_eq!(loaded.recovered, None);
+    assert_eq!(loaded.log, s.log);
+    for (a, b) in loaded.log.entries().iter().zip(s.log.entries()) {
+        assert_eq!(encode_entry(a).unwrap(), encode_entry(b).unwrap());
+    }
+    // The assistant slice is the response's content, byte for byte (empty thinking, 1e5, unknown block kept).
+    let Slice::Assistant { content, .. } = loaded.log.slice(Seq(5)).unwrap() else {
+        panic!("seq 5 is the first assistant message");
+    };
+    assert!(content.as_str().contains(r#""thinking":"""#));
+    assert!(content.as_str().contains("1e5"));
+    loaded.log.verify_requests(&assemble).unwrap();
+}
+
+async fn recipe_hash_detects_tampering<S: LogStore>(store: &S) {
+    let mut s = new_session(store).await;
+    let mut v = vec![s.prefix()];
+    v.extend(s.tool_turn("x", "toolu_01"));
+    append(store, &s, v).await;
+    let log = store.load(s.log.header().session).await.unwrap().log;
+    let mut entries = log.entries().to_vec();
+    for e in &mut entries {
+        if let Body::ToolResult { block, .. } = &mut e.body {
+            *block = raw(r#"{"type":"tool_result","tool_use_id":"toolu_01","content":"ok"}"#);
+        }
+    }
+    let mut tampered = Log::new(log.header().clone());
+    tampered.append(Seq(1), entries).unwrap();
+    assert!(matches!(
+        tampered.verify_requests(&assemble),
+        Err(LogError::HashMismatch { seq: Seq(8), .. })
+    ));
+}
+
+async fn optimistic_append<S: LogStore + 'static>(store: Arc<S>) {
+    let mut s = new_session(&*store).await;
+    let e = s.prefix();
+    let id = s.log.header().session;
+    let tasks: Vec<_> = (0..8)
+        .map(|_| {
+            let (store, e) = (Arc::clone(&store), e.clone());
+            tokio::spawn(async move {
+                store
+                    .append(id, Seq(1), vec![e], Durability::Buffered)
+                    .await
+            })
+        })
+        .collect();
+    let mut ok = 0;
+    for t in tasks {
+        match t.await.unwrap() {
+            Ok(next) => {
+                assert_eq!(next, Seq(2));
+                ok += 1;
+            }
+            Err(LogError::Conflict {
+                expected: 1,
+                actual: 2,
+            }) => {}
+            Err(other) => panic!("{other}"),
+        }
+    }
+    assert_eq!(ok, 1);
+    assert_eq!(store.load(id).await.unwrap().log.entries().len(), 1);
+}
+
+async fn invariants_refuse_the_whole_batch<S: LogStore>(store: &S) {
+    let mut s = new_session(store).await;
+    let p = s.prefix();
+    let id = s.log.header().session;
+    let mut wrong_seg = s.user("hi");
+    wrong_seg.seg = sarathi_log::SegmentId(1);
+    let r = store
+        .append(id, Seq(1), vec![p.clone(), wrong_seg], Durability::Durable)
+        .await;
+    assert!(
+        matches!(r, Err(LogError::Invalid { seq: Seq(2), .. })),
+        "{r:?}"
+    );
+    let dangling = sarathi_log::Entry {
+        seq: Seq(2),
+        seg: sarathi_log::SegmentId(0),
+        ts: 0,
+        body: Body::AssistantMessage {
+            from: Seq(1),
+            calls: vec![],
+        },
+    };
+    let r = store
+        .append(id, Seq(1), vec![p, dangling], Durability::Durable)
+        .await;
+    assert!(
+        matches!(r, Err(LogError::Invalid { seq: Seq(2), .. })),
+        "{r:?}"
+    );
+    assert!(store.load(id).await.unwrap().log.entries().is_empty());
+}
+
+async fn resume_at_every_point<S: LogStore>(store: &S) {
+    let mut s = new_session(store).await;
+    let mut v = vec![s.prefix()];
+    v.extend(s.tool_turn("x", "toolu_01"));
+    append(store, &s, v).await;
+    let log = store.load(s.log.header().session).await.unwrap().log;
+    // 1 prefix, 2 user, 3 request, 4 response, 5 assistant, 6 start, 7 result, 8 request, 9 response,
+    // 10 assistant, 11 end.
+    let expect: [(u64, Option<CallStatus>, Option<u64>, bool); 11] = [
+        (1, None, None, false),
+        (2, None, None, true),
+        (3, None, Some(3), true),
+        (4, None, Some(3), true),
+        (5, Some(CallStatus::NotStarted), None, true),
+        (6, Some(CallStatus::StartedWrite), None, true),
+        (7, Some(CallStatus::Done), None, true),
+        (8, Some(CallStatus::Done), Some(8), true),
+        (9, Some(CallStatus::Done), Some(8), true),
+        (10, None, None, true),
+        (11, None, None, false),
+    ];
+    for (at, call, pending, in_turn) in expect {
+        let r = log.up_to(Seq(at)).unwrap().resume();
+        assert_eq!(r.calls.first().map(|c| c.status), call, "at {at}");
+        assert_eq!(r.pending_model, pending.map(Seq), "at {at}");
+        assert_eq!(r.in_turn, in_turn, "at {at}");
+        assert_eq!(r.next, Seq(at + 1));
+    }
+}
+
+async fn a_started_read_is_run_again<S: LogStore>(store: &S) {
+    let mut s = new_session(store).await;
+    let mut v = vec![s.prefix(), s.user("look"), s.request()];
+    v.extend(s.respond(
+        r#"[{"type":"tool_use","id":"toolu_r","name":"look","input":{}},{"type":"tool_use","id":"toolu_w","name":"edit","input":{}}]"#,
+        &[("toolu_r", "look"), ("toolu_w", "edit")],
+    ));
+    v.push(s.start("toolu_r", "look", Effect::Read));
+    append(store, &s, v).await;
+    let r = store
+        .load(s.log.header().session)
+        .await
+        .unwrap()
+        .log
+        .resume();
+    let st: Vec<_> = r.calls.iter().map(|c| c.status).collect();
+    assert_eq!(st, [CallStatus::StartedRead, CallStatus::NotStarted]);
+    assert!(!r.at_boundary());
+}
+
+async fn fork_projects_the_parents_next_request<S: LogStore>(store: &S) {
+    let mut s = new_session(store).await;
+    let mut v = vec![s.prefix()];
+    v.extend(s.tool_turn("one", "toolu_01"));
+    v.extend(s.tool_turn("two", "toolu_02"));
+    append(store, &s, v).await;
+    let parent = s.log.header().session;
+    let at = Seq(11); // the first turn's end
+    let child = fork(store, parent, at, 7).await.unwrap();
+    let child_log = store.load(child).await.unwrap().log;
+    let from = child_log.header().forked_from.unwrap();
+    assert_eq!((from.session, from.seq), (parent, at));
+    assert_eq!(from.sha256, s.log.lines_sha256(at).unwrap());
+    let params = raw(r#"{"model":"m"}"#);
+    let at_parent = s.log.up_to(at).unwrap();
+    let body = |log: &Log| {
+        let r = log.next_recipe(params.clone()).unwrap();
+        sha256_hex(&assemble(&log.request_parts(&r).unwrap()))
+    };
+    assert_eq!(body(&child_log), body(&at_parent));
+    assert!(matches!(
+        child_log.entries().last().unwrap().body,
+        Body::SegmentStart {
+            reason: SegmentReason::Fork,
+            ..
+        }
+    ));
+    // Inside the second turn's tool round: refused.
+    for mid in [13, 14, 16, 18] {
+        assert!(matches!(
+            fork(store, parent, Seq(mid), 7).await,
+            Err(LogError::NotABoundary(_))
+        ));
+    }
+}
+
+async fn a_compaction_segment_projects_its_seed_and_its_own_slices<S: LogStore>(store: &S) {
+    let mut s = new_session(store).await;
+    let mut v = vec![s.prefix()];
+    v.extend(s.tool_turn("one", "toolu_01"));
+    v.extend(s.tool_turn("two", "toolu_02"));
+    // Keep the first user message and the second turn's final answer verbatim.
+    v.push(s.compact(vec![Seq(2), Seq(20)], Seq(1)..Seq(22)));
+    v.push(s.user("three"));
+    append(store, &s, v).await;
+    let log = store.load(s.log.header().session).await.unwrap().log;
+    let p = log.projection();
+    assert_eq!(p.segment.0, 1);
+    assert_eq!(p.prefix, Some(Seq(1)));
+    assert_eq!(p.messages, [Seq(2), Seq(20), Seq(23)]);
+    // Nothing replaced is gone.
+    assert!(matches!(log.slice(Seq(7)), Ok(Slice::ToolResult { .. })));
+    let r = log.next_recipe(raw("{}")).unwrap();
+    assert_eq!(r.messages, p.messages);
+}
+
+/// A compaction batch (seed slices, then its `segment.start`) cut short at every entry: the old segment projects and
+/// resumes as before until the `segment.start` is written; after it, the seed is the projection.
+async fn a_seed_batch_cut_short_leaves_the_old_segment_as_it_was<S: LogStore>(store: &S) {
+    let mut s = new_session(store).await;
+    let mut v = vec![s.prefix()];
+    v.extend(s.tool_turn("one", "toolu_01"));
+    v.extend(s.tool_turn("two", "toolu_02"));
+    v.push(s.user("three"));
+    append(store, &s, v).await;
+    let before = s.log.clone();
+    let note = s.push(Body::SegmentSeed {
+        role: sarathi_protocol::Role::User,
+        content: raw(r#""earlier turns removed""#),
+        from: None,
+        calls: vec![],
+    });
+    // Turn two's first assistant message (seq 15) without its thinking.
+    let copy = s.push(Body::SegmentSeed {
+        role: sarathi_protocol::Role::Assistant,
+        content: raw(r#"[{"type":"tool_use","id":"toolu_02","name":"edit","input":{"path":"a.css","z":1e5}}]"#),
+        from: Some(Seq(15)),
+        calls: vec![sarathi_log::CallRef {
+            id: "toolu_02".into(),
+            name: "edit".into(),
+        }],
+    });
+    let seed = vec![
+        Seq(2),
+        note.seq,
+        Seq(12),
+        copy.seq,
+        Seq(17),
+        Seq(20),
+        Seq(22),
+    ];
+    let start = s.compact(seed.clone(), Seq(1)..note.seq);
+    let batch = vec![note, copy, start];
+    for cut in 0..batch.len() {
+        let mut part = before.clone();
+        part.append(part.next_seq(), batch[..cut].to_vec()).unwrap();
+        assert_eq!(part.projection(), before.projection(), "cut at {cut}");
+        assert_eq!(
+            part.resume(),
+            ResumeState {
+                next: part.next_seq(),
+                ..before.resume()
+            },
+            "cut at {cut}"
+        );
+    }
+    append(store, &s, batch).await;
+    let log = store.load(s.log.header().session).await.unwrap().log;
+    assert_eq!(log, s.log);
+    assert_eq!(log.projection().messages, seed);
+    let Slice::Assistant { content, calls } = log.slice(seed[3]).unwrap() else {
+        panic!("the copy is an assistant slice");
+    };
+    assert!(!content.as_str().contains("thinking"));
+    assert_eq!(calls.len(), 1);
+    assert!(matches!(log.slice(seed[1]), Ok(Slice::User { .. })));
+    assert!(log.resume().in_turn);
+    assert!(log.resume().at_boundary());
+    // A reader that does not know the kind refuses the log.
+    let line = encode_entry(&log.entries()[usize::try_from(seed[1].0).unwrap() - 1]).unwrap();
+    assert!(
+        line.contains(r#""kind":"segment.seed","must_understand":true"#),
+        "{line}"
+    );
+}
+
+/// Appends `body` as the next entry and expects the store to refuse it as invalid; the mirror is unchanged.
+async fn refused<S: LogStore>(store: &S, s: &Script, body: Body) {
+    let next = s.log.next_seq();
+    let seg = match body {
+        Body::SegmentStart { .. } => sarathi_log::SegmentId(s.log.segment().0 + 1),
+        _ => s.log.segment(),
+    };
+    let e = sarathi_log::Entry {
+        seq: next,
+        seg,
+        ts: 0,
+        body,
+    };
+    let r = store
+        .append(s.log.header().session, next, vec![e], Durability::Durable)
+        .await;
+    assert!(
+        matches!(r, Err(LogError::Invalid { seq, .. }) if seq == next),
+        "{r:?}"
+    );
+}
+
+async fn an_interrupted_model_call_ends_with_its_turn<S: LogStore>(store: &S) {
+    let mut s = new_session(store).await;
+    let v = vec![s.prefix(), s.user("one"), s.request()];
+    append(store, &s, v).await;
+    assert_eq!(s.log.resume().pending_model, Some(Seq(3)));
+    // An interrupt during the call writes no answer, only the end of the turn.
+    let end = s.push(Body::TurnEnd {
+        outcome: "interrupted".into(),
+    });
+    append(store, &s, vec![end]).await;
+    let id = s.log.header().session;
+    let r = store.load(id).await.unwrap().log.resume();
+    assert_eq!(r.pending_model, None);
+    assert!(!r.in_turn);
+    assert!(r.at_boundary());
+    // The end of that turn is a boundary: a fork there is allowed.
+    fork(store, id, Seq(4), 7).await.unwrap();
+    let u = s.user("two");
+    append(store, &s, vec![u]).await;
+    assert_eq!(
+        store.load(id).await.unwrap().log.resume().pending_model,
+        None
+    );
+    // A new turn never inherits an unanswered request, even without a `turn.end` before it.
+    let mut s = new_session(store).await;
+    let v = vec![s.prefix(), s.user("one"), s.request(), s.user("two")];
+    append(store, &s, v).await;
+    assert_eq!(s.log.resume().pending_model, None);
+}
+
+async fn a_turn_ends_only_once_its_calls_are_answered<S: LogStore>(store: &S) {
+    let mut s = new_session(store).await;
+    let mut v = vec![s.prefix(), s.user("one"), s.request()];
+    v.extend(s.respond(
+        r#"[{"type":"tool_use","id":"toolu_01","name":"edit","input":{}},{"type":"tool_use","id":"toolu_02","name":"look","input":{}}]"#,
+        &[("toolu_01", "edit"), ("toolu_02", "look")],
+    ));
+    v.push(s.result("toolu_01", "done"));
+    append(store, &s, v).await;
+    let end = || Body::TurnEnd {
+        outcome: "interrupted".into(),
+    };
+    refused(store, &s, end()).await;
+    let r = s.result("toolu_02", "cut short by an interrupt");
+    let e = s.push(end());
+    append(store, &s, vec![r, e]).await;
+    assert!(s.log.resume().at_boundary());
+}
+
+async fn tool_entries_name_a_call_that_was_asked_for<S: LogStore>(store: &S) {
+    let mut s = new_session(store).await;
+    let mut v = vec![s.prefix(), s.user("one"), s.request()];
+    v.extend(s.respond(
+        r#"[{"type":"tool_use","id":"toolu_01","name":"edit","input":{}}]"#,
+        &[("toolu_01", "edit")],
+    ));
+    append(store, &s, v).await;
+    refused(
+        store,
+        &s,
+        Body::ToolStart {
+            call: "nope".into(),
+            tool: "edit".into(),
+            effect: Effect::Write,
+        },
+    )
+    .await;
+    let block = raw(r#"{"type":"tool_result","tool_use_id":"nope","content":"x"}"#);
+    refused(
+        store,
+        &s,
+        Body::ToolResult {
+            call: "nope".into(),
+            block,
+            is_error: false,
+            spill: None,
+        },
+    )
+    .await;
+    let v = vec![s.result("toolu_01", "done"), s.end()];
+    append(store, &s, v).await;
+    // After the turn ends, no call is open: even the old id is refused.
+    refused(
+        store,
+        &s,
+        Body::ToolStart {
+            call: "toolu_01".into(),
+            tool: "edit".into(),
+            effect: Effect::Write,
+        },
+    )
+    .await;
+}
+
+async fn nothing_moves_past_an_open_tool_round<S: LogStore>(store: &S) {
+    let mut s = new_session(store).await;
+    let mut v = vec![s.prefix(), s.user("one"), s.request()];
+    v.extend(s.respond(
+        r#"[{"type":"tool_use","id":"toolu_01","name":"look","input":{}}]"#,
+        &[("toolu_01", "look")],
+    ));
+    v.push(s.start("toolu_01", "look", Effect::Read));
+    append(store, &s, v).await;
+    // A user message that starts a turn, or a request, would send a `tool_use` with no result.
+    refused(
+        store,
+        &s,
+        Body::UserMessage {
+            content: raw(r#""two""#),
+            steer: false,
+        },
+    )
+    .await;
+    let recipe = s.log.next_recipe(raw("{}")).unwrap();
+    refused(
+        store,
+        &s,
+        Body::ModelRequest {
+            recipe,
+            sha256: "0".repeat(64),
+            compaction: None,
+        },
+    )
+    .await;
+    // A steer is fine, and a started read may start again (after a restart).
+    let v = vec![
+        s.push(Body::UserMessage {
+            content: raw(r#""also""#),
+            steer: true,
+        }),
+        s.start("toolu_01", "look", Effect::Read),
+        s.result("toolu_01", "seen"),
+    ];
+    append(store, &s, v).await;
+    // Once answered, the call neither starts nor is answered again.
+    refused(
+        store,
+        &s,
+        Body::ToolStart {
+            call: "toolu_01".into(),
+            tool: "look".into(),
+            effect: Effect::Read,
+        },
+    )
+    .await;
+    let block = raw(r#"{"type":"tool_result","tool_use_id":"toolu_01","content":"again"}"#);
+    refused(
+        store,
+        &s,
+        Body::ToolResult {
+            call: "toolu_01".into(),
+            block,
+            is_error: false,
+            spill: None,
+        },
+    )
+    .await;
+    let r = s.request();
+    append(store, &s, vec![r]).await;
+}
+
+async fn entry_fields_are_checked<S: LogStore>(store: &S) {
+    let mut s = new_session(store).await;
+    let v = vec![s.prefix(), s.user("one")];
+    append(store, &s, v).await;
+    let recipe = s.log.next_recipe(raw("{}")).unwrap();
+    refused(
+        store,
+        &s,
+        Body::ModelRequest {
+            recipe,
+            sha256: "A".repeat(64),
+            compaction: None,
+        },
+    )
+    .await;
+    let start = |reason, strategy| Body::SegmentStart {
+        reason,
+        strategy,
+        seed: vec![Seq(2)],
+        replaces: None,
+    };
+    refused(store, &s, start(SegmentReason::Compaction, None)).await;
+    refused(
+        store,
+        &s,
+        start(
+            SegmentReason::Fork,
+            Some(sarathi_log::Strategy::Deterministic),
+        ),
+    )
+    .await;
+    refused(
+        store,
+        &s,
+        start(
+            SegmentReason::ProtocolSwitch,
+            Some(sarathi_log::Strategy::Server),
+        ),
+    )
+    .await;
+    let ok = s.push(start(SegmentReason::Fork, None));
+    append(store, &s, vec![ok]).await;
+}
+
+macro_rules! conformance {
+    ($($name:ident),* $(,)?) => {
+        mod memory {
+            $(#[tokio::test(flavor = "multi_thread")]
+            async fn $name() {
+                super::$name(&sarathi_log::MemoryStore::new()).await;
+            })*
+        }
+        mod jsonl {
+            $(#[tokio::test(flavor = "multi_thread")]
+            async fn $name() {
+                let dir = tempfile::tempdir().unwrap();
+                super::$name(&sarathi_log::JsonlStore::new(dir.path())).await;
+            })*
+        }
+    };
+}
+
+conformance!(
+    byte_identity,
+    recipe_hash_detects_tampering,
+    invariants_refuse_the_whole_batch,
+    resume_at_every_point,
+    a_started_read_is_run_again,
+    fork_projects_the_parents_next_request,
+    a_compaction_segment_projects_its_seed_and_its_own_slices,
+    a_seed_batch_cut_short_leaves_the_old_segment_as_it_was,
+    an_interrupted_model_call_ends_with_its_turn,
+    a_turn_ends_only_once_its_calls_are_answered,
+    tool_entries_name_a_call_that_was_asked_for,
+    entry_fields_are_checked,
+    nothing_moves_past_an_open_tool_round,
+);
+
+#[tokio::test(flavor = "multi_thread")]
+async fn optimistic_append_memory() {
+    optimistic_append(Arc::new(MemoryStore::new())).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn optimistic_append_jsonl() {
+    let dir = tempfile::tempdir().unwrap();
+    optimistic_append(Arc::new(JsonlStore::new(dir.path()))).await;
+}
