@@ -37,6 +37,7 @@ Kinds: `session.prefix`, `message.user`, `model.request`, `model.response`, `mod
 - `segment.seed` added: a slice made for a compaction seed (`role`, `content`, optional `from`, optional `calls`).
   It is projected only through a `segment.start` that names it and ignored by resume, so a seed batch cut short
   before its `segment.start` leaves the old segment's projection and resume unchanged.
-- `segment.seed`'s `from` may name the `model.response` of a compaction call (a server compaction block copied byte
-  for byte, or a client summary); a `segment.start` after an unanswered `model.request` answers it (that request was
-  the compaction call).
+- `model.request` has an optional `compaction` (`server` or `client_summary`) on a compaction call. Its
+  `model.response` is never accepted as a `message.assistant`: a `segment.seed` copies it (`from` names the
+  response: a server compaction block byte for byte, or a client summary), and the `segment.start` whose seed holds
+  that copy answers the request for resume. A `segment.start` with any other seed answers nothing.
