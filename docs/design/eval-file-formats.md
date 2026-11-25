@@ -5,9 +5,10 @@ reads N and N-1. Version 1 is the first of each, so no N-1 exists yet; the rules
 
 ## Brief set (`*.jsonl`)
 
-- Line 1 is the header `{"sarathi_brief_set": 1}`; every further line is one brief. Written version: `BRIEF_SET_VERSION`.
+- Line 1 is the header `{"sarathi_brief_set": 2}`; every further line is one brief. Written version: `BRIEF_SET_VERSION`.
 - Brief fields: `id` (unique, a plain path component), `split` (`tuning` | `measurement`), `site_context`, `text`,
-  `allowed_models` (the *slots* a brief may run on, such as `strong`; not model ids), `acceptance` (name of the check).
+  `allowed_models` (the *slots* a brief may run on, such as `strong`; not model ids), `acceptance` (name of the check), and from version 2 an optional `fault` (a fault the harness must inject, e.g.
+  `malformed_steps`). Version 1 sets, which have no `fault`, still read.
 - Unknown fields are refused (`deny_unknown_fields`) in the header and in every brief, so a newer file is never read
   silently as an older one. A newer version number is refused with `BriefError::Version`.
 - N-1 rule: a change that adds a field bumps the version; the new reader accepts the old file by defaulting the
