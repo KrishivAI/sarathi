@@ -15,6 +15,7 @@ use crate::message::Seq;
 pub struct SessionId(pub u128);
 
 /// A text that is not a hyphenated UUID; holds at most its first 64 characters.
+#[non_exhaustive]
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 #[error("not a session id: {0:?}")]
 pub struct BadSessionId(pub Box<str>);
@@ -167,7 +168,7 @@ mod tests {
         assert_eq!(upper, id);
         assert_eq!(upper.to_string(), text, "always written lower-case");
         let escaped: SessionId =
-            serde_json::from_str(r#""0193a1b2-c3d4-7e5f-8a9b-0c1d2e3f4a5b""#).unwrap();
+            serde_json::from_str(r#""\u0030193a1b2-c3d4-7e5f-8a9b-0c1d2e3f4a5b""#).unwrap();
         assert_eq!(escaped, id, "an escaped JSON string reads the same");
     }
 

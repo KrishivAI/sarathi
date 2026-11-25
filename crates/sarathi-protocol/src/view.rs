@@ -8,6 +8,9 @@ use serde::{Deserialize, Serialize};
 use crate::raw::RawJson;
 
 /// Token counts of one call, as the provider reported them. Missing and `null` counts are 0.
+///
+/// Fixed shape: other crates build it with a struct literal, so a new field is a breaking change, made deliberately
+/// (a design note) and in every crate at once. A stored value missing a count reads it as 0.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Usage {
@@ -72,6 +75,9 @@ pub enum BlockKind {
 }
 
 /// One content block: what it is and where its bytes are.
+///
+/// Fixed shape: other crates build it with a struct literal, so a new field is a breaking change, made deliberately
+/// (a design note) and in every crate at once.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BlockView {
     /// What the block is.
@@ -82,7 +88,12 @@ pub struct BlockView {
 
 /// The parts of a response the core reads: the stop reason, usage and the blocks. Ranges point into the response
 /// body; a body over 4 GiB is refused, so they fit `u32`.
+///
+/// Fixed shape: other crates build it with a struct literal, so a new field is a breaking change, made deliberately
+/// (a design note) and in every crate at once. A stored value missing a field reads it as its default, so a field
+/// added later does not make older stored views unreadable.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
 pub struct ResponseView {
     /// The message id (`msg_…`).
     pub id: Option<Box<str>>,
@@ -111,6 +122,14 @@ impl ResponseView {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_stored_view_with_missing_fields_reads_them_as_defaults() {
+        let v: ResponseView = serde_json::from_str(r#"{"stop_reason":"end_turn"}"#).unwrap();
+        assert_eq!(v.stop_reason.as_deref(), Some("end_turn"));
+        assert_eq!(v.usage, Usage::default());
+        assert!(v.blocks.is_empty());
+    }
 
     #[test]
     fn tool_uses_lists_client_calls_only() {

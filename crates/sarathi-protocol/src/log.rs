@@ -235,6 +235,7 @@ pub struct EntryHead {
 }
 
 /// An entry of a kind this crate does not know, marked [`MUST_UNDERSTAND`].
+#[non_exhaustive]
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 #[error("entry {seq} is of kind `{kind}`, which this reader does not know and must understand")]
 pub struct UnknownRequired {
@@ -473,6 +474,14 @@ mod tests {
         assert_eq!(other, EntryKind::Other("tool.progress".into()));
         assert!(!other.is_known());
         assert_eq!(serde_json::to_string(&other).unwrap(), r#""tool.progress""#);
+    }
+
+    #[test]
+    fn must_understand_names_the_field_entry_head_writes() {
+        let mut head = EntryHead::new(Seq(1), SegmentId(0), EntryKind::Other("x.y".into()));
+        head.must_understand = true;
+        let v = serde_json::to_value(&head).unwrap();
+        assert_eq!(v.get(MUST_UNDERSTAND), Some(&serde_json::Value::Bool(true)));
     }
 
     #[test]

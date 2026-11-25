@@ -61,6 +61,9 @@ pub enum Decision {
 }
 
 /// A tool's result, rendered once for the session's protocol.
+///
+/// Fixed shape: other crates build it with a struct literal, so a new field is a breaking change, made deliberately
+/// (a design note) and in every crate at once.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ToolOutput {
     /// The result content, as the provider protocol wants it in a tool result.
