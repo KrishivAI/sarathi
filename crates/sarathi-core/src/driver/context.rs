@@ -37,6 +37,9 @@ pub(super) struct Checked {
     pub(super) changed: bool,
     /// The next request cannot fit the window even after the fallback dropped all it may: it must not be sent.
     pub(super) does_not_fit: bool,
+    /// What the compaction calls the check made cost, in micro-dollars (a call without a known cost counts as zero):
+    /// the driver adds it to the turn's spend.
+    pub(super) spent_micros: u64,
 }
 
 /// Brings the log's context within the profile before the next request: finishes a compaction call left open, then
@@ -58,11 +61,13 @@ pub(super) async fn maintain<S: LogStore, C: ModelCaller>(
     let start = w.log.next_seq();
     let mut counted = None;
     let mut does_not_fit = false;
+    let mut spent_micros = 0u64;
     let mut decided = false;
     for _ in 0..MAX_PASSES {
         if let Some(p) = pending_compaction(w.log) {
             if p.response.is_none() {
-                resend(w, caller, p.request).await?;
+                let cost = resend(w, caller, p.request, on_event).await?;
+                spent_micros = spent_micros.saturating_add(cost);
             }
             if pending_compaction(w.log).is_some_and(|p| p.response.is_some()) {
                 seed(w, on_event).await?;
@@ -86,9 +91,10 @@ pub(super) async fn maintain<S: LogStore, C: ModelCaller>(
         match action {
             ContextAction::CountTokens => counted = Some(count(w, caller).await),
             ContextAction::Compact(c) => {
-                if !compact(w, caller, c, on_event).await? {
+                let Some(cost) = compact(w, caller, c, on_event).await? else {
                     break;
-                }
+                };
+                spent_micros = spent_micros.saturating_add(cost);
                 counted = None;
             }
             ContextAction::Overflow => match overflow_seed(w.log, profile, now_ms()) {
@@ -118,6 +124,7 @@ pub(super) async fn maintain<S: LogStore, C: ModelCaller>(
     Ok(Checked {
         changed: w.log.next_seq() != start,
         does_not_fit,
+        spent_micros,
     })
 }
 
@@ -138,19 +145,20 @@ async fn count<S: LogStore, C: ModelCaller>(w: &Writer<'_, S>, caller: &C) -> u6
 }
 
 /// Makes the compaction call: appends its entries and `model.request`, sends it, appends the answer or the failure.
-/// `false`: the call could not be built (reported), so the check stops.
+/// `Some` with the call's cost (zero when unknown, or when the call failed); `None`: the call could not be built
+/// (reported), so the check stops.
 async fn compact<S: LogStore, C: ModelCaller>(
     w: &mut Writer<'_, S>,
     caller: &C,
     compactor: Compactor,
     on_event: &mut (dyn FnMut(Event) + Send),
-) -> Result<bool, String> {
+) -> Result<Option<u64>, String> {
     let ts = now_ms();
     let req = match compaction_request(w.log, compactor, &caller.params(), None, ts) {
         Ok(r) => r,
         Err(e) => {
             report(on_event, &e);
-            return Ok(false);
+            return Ok(None);
         }
     };
     let at = w.log.next_seq();
@@ -162,7 +170,7 @@ async fn compact<S: LogStore, C: ModelCaller>(
         let mut copy = w.log.clone();
         if let Err(e) = copy.append(at, req.entries.clone()) {
             report(on_event, &ContextError::Log(e));
-            return Ok(false);
+            return Ok(None);
         }
         ahead = copy;
         &ahead
@@ -171,7 +179,7 @@ async fn compact<S: LogStore, C: ModelCaller>(
         Ok(parts) => caller.prepare(&parts),
         Err(e) => {
             report(on_event, &ContextError::Log(e));
-            return Ok(false);
+            return Ok(None);
         }
     };
     let (body, request) = match prepared {
@@ -181,7 +189,7 @@ async fn compact<S: LogStore, C: ModelCaller>(
                 kind: f.kind,
                 detail: format!("the compaction call cannot be built: {}", f.detail).into(),
             });
-            return Ok(false);
+            return Ok(None);
         }
     };
     let mut entries = req.entries.clone();
@@ -193,20 +201,20 @@ async fn compact<S: LogStore, C: ModelCaller>(
         body: req.model_request(sha256_hex(&body)),
     });
     w.write_entries(at, entries, Durability::Buffered).await?;
-    call(w, caller, request).await?;
-    Ok(true)
+    call(w, caller, request, on_event).await.map(Some)
 }
 
-/// Sends the compaction request at `request` again, as logged. A request that no longer builds to the logged bytes
-/// is answered with a failure instead.
+/// Sends the compaction request at `request` again, as logged, and gives its cost as [`call`] does. A request that
+/// no longer builds to the logged bytes is answered with a failure instead.
 async fn resend<S: LogStore, C: ModelCaller>(
     w: &mut Writer<'_, S>,
     caller: &C,
     request: Seq,
-) -> Result<(), String> {
+    on_event: &mut (dyn FnMut(Event) + Send),
+) -> Result<u64, String> {
     let Some(Body::ModelRequest { recipe, sha256, .. }) = w.log.get(request).map(|e| &e.body)
     else {
-        return Ok(());
+        return Ok(0);
     };
     let prepared = w
         .log
@@ -214,37 +222,47 @@ async fn resend<S: LogStore, C: ModelCaller>(
         .map_err(|e| CallFailure::new(ErrorKind::Unassemblable, e.to_string()))
         .and_then(|parts| caller.prepare(&parts));
     match prepared {
-        Ok((body, req)) if sha256_hex(&body) == *sha256 => call(w, caller, req).await,
+        Ok((body, req)) if sha256_hex(&body) == *sha256 => call(w, caller, req, on_event).await,
         Ok(_) => {
             let f = CallFailure::new(
                 ErrorKind::HistoryMismatch,
                 "the compaction request no longer builds to the bytes logged",
             );
-            failure(w, &f).await
+            failure(w, &f).await.map(|()| 0)
         }
-        Err(f) => failure(w, &f).await,
+        Err(f) => failure(w, &f).await.map(|()| 0),
     }
 }
 
-/// Sends a logged compaction request and appends its `model.response` or `model.failure`.
+/// Sends a logged compaction request and appends its `model.response` or `model.failure`. An answer is reported as
+/// [`Event::Usage`], like the turn's own calls, and its cost returned (zero when unknown or when the call failed).
 async fn call<S: LogStore, C: ModelCaller>(
     w: &mut Writer<'_, S>,
     caller: &C,
     request: C::Prepared,
-) -> Result<(), String> {
+    on_event: &mut (dyn FnMut(Event) + Send),
+) -> Result<u64, String> {
     match caller.send(request).await {
         Ok(r) => {
             let at = w.log.next_seq();
+            let usage = r.view.usage;
+            let cost_micros = r.cost_micros;
             let body = Body::ModelResponse {
                 body: r.body,
                 content: r.content,
                 sse: r.sse,
                 request_id: r.request_id,
-                usage: r.view.usage,
+                usage,
             };
-            w.write(at, vec![body], Durability::Durable).await
+            w.write(at, vec![body], Durability::Durable).await?;
+            on_event(Event::Usage {
+                seq: at,
+                usage,
+                cost_micros,
+            });
+            Ok(cost_micros.unwrap_or(0))
         }
-        Err(f) => failure(w, &f).await,
+        Err(f) => failure(w, &f).await.map(|()| 0),
     }
 }
 

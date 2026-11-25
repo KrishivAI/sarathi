@@ -40,6 +40,18 @@ pub enum Reply {
     Fail(ErrorKind),
     /// The call answers after this long (on the test clock).
     Slow(Duration, String),
+    /// A Messages answer body that cost this many micro-dollars.
+    Priced(u64, String),
+}
+
+impl Reply {
+    /// This answer, at a cost of `micros` micro-dollars (a body only).
+    pub fn priced(self, micros: u64) -> Reply {
+        match self {
+            Reply::Body(b) => Reply::Priced(micros, b),
+            other => panic!("only a body is priced: {other:?}"),
+        }
+    }
 }
 
 /// A Messages answer: optional text, then `tool_use` blocks `(id, name, input)`.
@@ -129,6 +141,9 @@ impl ModelCaller for Scripted {
                 None => Err(CallFailure::new(ErrorKind::Upstream, "script exhausted")),
                 Some(Reply::Fail(kind)) => Err(CallFailure::new(kind, "scripted failure")),
                 Some(Reply::Body(b)) => anthropic::answer(&raw(&b)),
+                Some(Reply::Priced(micros, b)) => {
+                    anthropic::answer(&raw(&b)).map(|r| r.with_cost(micros))
+                }
                 Some(Reply::Slow(d, b)) => {
                     tokio::time::sleep(d).await;
                     anthropic::answer(&raw(&b))

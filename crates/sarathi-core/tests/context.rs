@@ -221,6 +221,113 @@ async fn a_long_tool_loop_is_summarized_in_the_turn_and_goes_on() {
     check_log(d.log());
 }
 
+/// Usage events: the seq of each answer the host is told about, and its cost.
+fn usage_of(events: &[Event]) -> Vec<(u64, Option<u64>)> {
+    events
+        .iter()
+        .filter_map(|e| match e {
+            Event::Usage {
+                seq, cost_micros, ..
+            } => Some((seq.0, *cost_micros)),
+            _ => None,
+        })
+        .collect()
+}
+
+/// A driver whose turns may spend at most `cap` micro-dollars.
+async fn capped(context: ContextProfile, cap: u64, replies: Vec<Reply>) -> (TestDriver, Scripted) {
+    let model = Scripted::new(replies);
+    let mut limits = limits(10);
+    limits.max_cost_micros = Some(cap);
+    let config = config(ModelProfile::native())
+        .with_limits(limits)
+        .with_context(context);
+    let (d, _) = Driver::new(
+        config,
+        Shared::default(),
+        model.clone(),
+        TestTools::default(),
+        Host(None),
+    )
+    .await
+    .unwrap();
+    (d, model)
+}
+
+#[tokio::test]
+async fn a_summary_in_the_turn_is_reported_as_usage_and_counts_against_the_spend_cap() {
+    let replies = vec![
+        echo_call(1, 50).priced(100),
+        echo_call(2, 700).priced(100),
+        said("Summary: two echoes ran; one more is due.", 700).priced(100),
+        echo_call(3, 60).priced(100),
+        said("Done.", 70).priced(100),
+    ];
+    let (mut d, model) = capped(profile(Compactor::ClientSummary), 300, replies).await;
+    let mut events = Vec::new();
+    let end = d
+        .run_turn(user("Echo three times."), &mut sink(&mut events))
+        .await
+        .unwrap();
+    assert_eq!(end.outcome, Outcome::RanOut, "{events:#?}");
+    assert_eq!(model.left(), 2, "no call after the summary reached the cap");
+    let usage = usage_of(&events);
+    assert_eq!(usage.len(), 3, "{usage:?}");
+    assert!(usage.iter().all(|(_, c)| *c == Some(100)), "{usage:?}");
+    let summary = usage[2].0;
+    assert!(
+        matches!(
+            d.log().get(sarathi_protocol::Seq(summary)).map(|e| &e.body),
+            Some(Body::ModelResponse { .. })
+        ),
+        "the third usage event names the summary's answer"
+    );
+    assert!(events.iter().any(|e| matches!(
+        e,
+        Event::Error {
+            kind: ErrorKind::BudgetExceeded,
+            ..
+        }
+    )));
+    check_log(d.log());
+}
+
+#[tokio::test]
+async fn a_compaction_before_a_turn_is_reported_as_usage_and_charged_to_that_turn() {
+    let replies = vec![
+        said("Hello.", 700).priced(100),
+        compacted().priced(100),
+        echo_call(1, 50).priced(100),
+        said("never", 60).priced(100),
+    ];
+    let (mut d, model) = capped(profile(Compactor::Server), 150, replies).await;
+    let first = d
+        .run_turn(user("Say hello first."), &mut |_| {})
+        .await
+        .unwrap();
+    assert_eq!(first.outcome, Outcome::Finished);
+    let mut events = Vec::new();
+    let second = d
+        .run_turn(user("Now echo."), &mut sink(&mut events))
+        .await
+        .unwrap();
+    assert_eq!(second.outcome, Outcome::RanOut, "{events:#?}");
+    assert_eq!(
+        model.left(),
+        1,
+        "the compaction and the first call reach the cap"
+    );
+    assert_eq!(
+        usage_of(&events)
+            .iter()
+            .map(|(_, c)| *c)
+            .collect::<Vec<_>>(),
+        vec![Some(100), Some(100)],
+        "the compaction call is reported, then the turn's call"
+    );
+    check_log(d.log());
+}
+
 #[tokio::test]
 async fn a_compaction_answer_that_is_no_summary_fails_alone_and_the_turn_goes_on() {
     let replies = vec![

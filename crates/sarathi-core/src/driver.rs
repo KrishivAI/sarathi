@@ -397,12 +397,15 @@ where
         // Ops sent before this call wait in `self.late` (an interrupt among them, aimed at the last turn, is dropped),
         // so only an interrupt sent during the check below counts, and an error or a dropped future loses none.
         self.late = self.late_ops();
-        self.between_turns(on_event).await?;
+        let compacted = self.between_turns(on_event).await?;
         if self.interrupted_during_check() {
             return Err(DriverError::Interrupted);
         }
         let late = std::mem::take(&mut self.late);
         let mut first = self.core.step(Input::Op(op));
+        // A compaction call made for this turn counts against its spend cap from its second model call on (the first
+        // is asked for with the turn's start).
+        self.core.charge(compacted);
         self.join_turn(&mut first, late);
         self.drive_turn(first, on_event)
             .await
@@ -474,10 +477,11 @@ where
 
     /// The context check between turns: a compaction or a fallback seed starts a new segment the core is rebuilt on.
     /// The driver counts as dirty while it runs, so a dropped future leaves the next call to read the log again.
+    /// Gives what its compaction calls cost, in micro-dollars.
     async fn between_turns(
         &mut self,
         on_event: &mut (dyn FnMut(Event) + Send),
-    ) -> Result<(), DriverError> {
+    ) -> Result<u64, DriverError> {
         let profile = self.config.context.clone();
         self.dirty = true;
         let mut w = Writer {
@@ -498,7 +502,7 @@ where
                 if c.does_not_fit {
                     return Err(DriverError::DoesNotFit);
                 }
-                Ok(())
+                Ok(c.spent_micros)
             }
             // The store's copy may be ahead of ours: `dirty` stays set, so it is read again before the next turn.
             Err(detail) => Err(DriverError::Context(detail)),
@@ -662,10 +666,14 @@ where
                             }
                             Ok(c) if c.changed => {
                                 // A new segment (or a failed compaction call) sits at `at`: make the call again
-                                // after it, from the new segment.
+                                // after it, from the new segment. A compaction call's cost is the turn's: at the cap,
+                                // the core ends the turn instead.
+                                core.charge(c.spent_micros);
                                 let history = w.log.projection().messages;
                                 let again = core.reseat(at, history, w.log.next_seq());
-                                if !again.iter().any(|a| matches!(a, Action::CallModel { .. })) {
+                                if !again.iter().any(|a| {
+                                    matches!(a, Action::CallModel { .. } | Action::EndTurn(_))
+                                }) {
                                     // The core refused: nothing would be in flight and the turn would hang.
                                     for a in again {
                                         if let Action::Emit(e) = a {

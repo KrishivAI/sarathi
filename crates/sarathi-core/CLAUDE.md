@@ -63,6 +63,8 @@ gate.
   (`DriverError::Interrupted`); in a turn, one during a compaction call is read when the call returns.
 - Only string tool output spills; a result given as blocks stays inline.
 
-Status: core, driver, both callers, the toolbox adapter (`ToolboxTools`) and the context hooks written. Not yet: a
-compaction call's cost does not count toward the turn's spend cap; the stop hook is not yet called by the completion
-gate.
+- A compaction call is reported as `Event::Usage` and its cost is charged to the turn (`Core::charge`); the driver
+  refuses an `Op::ToolOutput` for the call its toolbox runs.
+
+Status: core, driver, both callers, the toolbox adapter (`ToolboxTools`) and the context hooks written. Not yet: the
+stop hook is not yet called by the completion gate.

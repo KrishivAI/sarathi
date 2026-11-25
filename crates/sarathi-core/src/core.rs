@@ -46,7 +46,9 @@ pub struct Limits {
     /// earlier ones ran (a denied call counts). Unknown and unreadable calls do not break a run of identical calls.
     pub repeat_limit: u32,
     /// The spend cap of a turn in micro-dollars, checked before every model call. An answer whose cost is not
-    /// known counts as zero, so the cap does not hold for a model without prices.
+    /// known counts as zero, so the cap does not hold for a model without prices. The driver's compaction calls
+    /// count too ([`Core::charge`]): one inside a turn before the call it preceded, one before a turn from that
+    /// turn's second call on.
     pub max_cost_micros: Option<u64>,
     /// How long an interrupted write tool is given to stop before it is abandoned.
     pub write_grace: Duration,
@@ -693,6 +695,9 @@ impl Core {
     /// segment's slices as its `history` and asks for the call again at `next_seq`, the log's next seq. The turn's
     /// steps, spend and held messages carry on. Refused unless the core waits for the call at `at` and `next_seq`
     /// is past it.
+    ///
+    /// The spend cap is checked again first, so a compaction call [`Core::charge`]d to the turn counts: at the cap,
+    /// the turn ends [`Outcome::RanOut`] instead of making the call.
     pub fn reseat(&mut self, at: Seq, history: Vec<Seq>, next_seq: Seq) -> Vec<Action> {
         let mut out = Vec::new();
         let calling = matches!(
@@ -707,6 +712,10 @@ impl Core {
             return out;
         }
         self.history = history;
+        self.next_seq = next_seq;
+        if self.cap_reached(&mut out) {
+            return out;
+        }
         let Some(t) = &mut self.turn else {
             return out;
         };
@@ -721,6 +730,32 @@ impl Core {
             },
         });
         out
+    }
+
+    /// Adds a model call the driver made for the running turn outside the core (a compaction call) to the turn's
+    /// spend; it counts against [`Limits::max_cost_micros`] from the next model call on. Nothing happens with no turn
+    /// running.
+    pub fn charge(&mut self, cost_micros: u64) {
+        if let Some(t) = &mut self.turn {
+            t.spent_micros = t.spent_micros.saturating_add(cost_micros);
+        }
+    }
+
+    /// At the spend cap, ends the turn [`Outcome::RanOut`] and says so.
+    fn cap_reached(&mut self, out: &mut Vec<Action>) -> bool {
+        let Some(t) = &self.turn else { return false };
+        match self.limits.max_cost_micros {
+            Some(cap) if t.spent_micros >= cap => {
+                out.push(Action::Emit(Event::Error {
+                    kind: ErrorKind::BudgetExceeded,
+                    detail: format!("the turn's spend cap of {cap} micro-dollars is reached")
+                        .into(),
+                }));
+                self.end(out, Outcome::RanOut, None);
+                true
+            }
+            _ => false,
+        }
     }
 
     /// The limits in force (clamped).
@@ -834,15 +869,10 @@ impl Core {
             let reply = step::ran_out(self.limits.max_steps);
             return self.end(out, Outcome::RanOut, Some(reply.into()));
         }
-        if let Some(cap) = self.limits.max_cost_micros
-            && t.spent_micros >= cap
-        {
-            out.push(Action::Emit(Event::Error {
-                kind: ErrorKind::BudgetExceeded,
-                detail: format!("the turn's spend cap of {cap} micro-dollars is reached").into(),
-            }));
-            return self.end(out, Outcome::RanOut, None);
+        if self.cap_reached(out) {
+            return;
         }
+        let Some(t) = &mut self.turn else { return };
         let at = self.next_seq;
         self.next_seq = Seq(at.0 + 1);
         t.stage = Stage::Calling { at };
