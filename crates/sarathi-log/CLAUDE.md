@@ -10,7 +10,11 @@ Rules:
   turn re-rendered without thinking. It is sent only through a `segment.start` that names it, and resume ignores it,
   so a seed batch cut short leaves the old segment as it was.
 - Format changes are recorded in `docs/design/log-format.md`.
-- `model.request` stores a recipe and the SHA-256 of the body sent; `Log::verify_requests` rebuilds and checks it.
+- `model.request` stores a recipe and the SHA-256 of the body sent. The store does not rebuild it on append (the
+  assembler lives in the provider crate): hosts run `Log::verify_requests`.
+- `turn.end` needs every call of the turn's last assistant message answered, and closes a pending model call.
+- `JsonlStore::load`/`append` lock and repair the session until `release`; `JsonlStore::read` is read-only.
+- A crash inside an append can keep a whole-line prefix of the batch: order batches so every prefix is resumable.
 - Crash rule support: `resume` reports each open call as not started, started read (run again) or started write
   (never run again; answer with `CUT_SHORT`).
 - Format version in the header; a reader of N reads N and N−1. Changing the meaning of a kind or the line framing

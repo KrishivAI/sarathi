@@ -32,6 +32,29 @@ Kinds: `session.prefix`, `message.user`, `model.request`, `model.response`, `mod
 `tool.ask`, `tool.decision`, `tool.start`, `tool.result`, `segment.seed` (`must_understand`), `segment.start`,
 `turn.end`, `note`.
 
+Invariants checked on every append and on every read (a log read is one a store would accept): dense seqs; an entry
+stays in the current segment unless it is a `segment.start`, which opens the next; references (`from`, `seed`, a
+recipe's `prefix` and `messages`) point back to entries of the right kind; a `segment.start` has a `strategy`
+exactly when its reason is `compaction`; `tool.start` and `tool.result` name a call the open turn's last
+`message.assistant` asked for; `turn.end` comes only after every such call has its `tool.result` (an interrupt
+answers open calls first); `model.request.sha256` is 64 lower-case hex digits. A fork's copy of its parent's lines
+must hash to `forked_from.sha256` (a fork cut short before its copy is complete is read as it is).
+
+Not checked on append: that a request's recipe rebuilds to its `sha256`. The body is assembled by the provider
+layer, so a log can hold a request whose recipe does not rebuild; hosts that need the guarantee run
+`Log::verify_requests` with their assembler (the eval runner and the fixture tests do).
+
+Resume: `turn.end` closes the turn, including a model call that has no answer (an interrupt or a budget stop
+during the call); a user message that starts a turn also leaves any older unanswered request behind.
+
+Crash atomicity: a refused batch writes nothing, but a crash during an append can leave a prefix of the batch in
+whole lines, and the reader accepts it. Writers order every batch so each prefix is a state they can resume from.
+
+Store surface: `LogStore` has `create(created, forked_from)`, `append(session, expected, entries, durability)` and
+`load(session)` (whole session); `fork` is a function over any store. The JSONL store's `load` and `append` open the
+session for writing (lock, torn-tail repair, kept until `release` or drop); `JsonlStore::read` takes no lock and
+changes nothing.
+
 ### Changes before the first release
 - `created` changed from integer milliseconds to RFC 3339 text; `forked_from.sha256` is a typed digest (same text).
 - `segment.seed` added: a slice made for a compaction seed (`role`, `content`, optional `from`, optional `calls`).

@@ -309,6 +309,166 @@ async fn a_seed_batch_cut_short_leaves_the_old_segment_as_it_was<S: LogStore>(st
     );
 }
 
+/// Appends `body` as the next entry and expects the store to refuse it as invalid; the mirror is unchanged.
+async fn refused<S: LogStore>(store: &S, s: &Script, body: Body) {
+    let next = s.log.next_seq();
+    let seg = match body {
+        Body::SegmentStart { .. } => sarathi_log::SegmentId(s.log.segment().0 + 1),
+        _ => s.log.segment(),
+    };
+    let e = sarathi_log::Entry {
+        seq: next,
+        seg,
+        ts: 0,
+        body,
+    };
+    let r = store
+        .append(s.log.header().session, next, vec![e], Durability::Durable)
+        .await;
+    assert!(
+        matches!(r, Err(LogError::Invalid { seq, .. }) if seq == next),
+        "{r:?}"
+    );
+}
+
+async fn an_interrupted_model_call_ends_with_its_turn<S: LogStore>(store: &S) {
+    let mut s = new_session(store).await;
+    let v = vec![s.prefix(), s.user("one"), s.request()];
+    append(store, &s, v).await;
+    assert_eq!(s.log.resume().pending_model, Some(Seq(3)));
+    // An interrupt during the call writes no answer, only the end of the turn.
+    let end = s.push(Body::TurnEnd {
+        outcome: "interrupted".into(),
+    });
+    append(store, &s, vec![end]).await;
+    let id = s.log.header().session;
+    let r = store.load(id).await.unwrap().log.resume();
+    assert_eq!(r.pending_model, None);
+    assert!(!r.in_turn);
+    assert!(r.at_boundary());
+    // The end of that turn is a boundary: a fork there is allowed.
+    fork(store, id, Seq(4), 7).await.unwrap();
+    let u = s.user("two");
+    append(store, &s, vec![u]).await;
+    assert_eq!(
+        store.load(id).await.unwrap().log.resume().pending_model,
+        None
+    );
+    // A new turn never inherits an unanswered request, even without a `turn.end` before it.
+    let mut s = new_session(store).await;
+    let v = vec![s.prefix(), s.user("one"), s.request(), s.user("two")];
+    append(store, &s, v).await;
+    assert_eq!(s.log.resume().pending_model, None);
+}
+
+async fn a_turn_ends_only_once_its_calls_are_answered<S: LogStore>(store: &S) {
+    let mut s = new_session(store).await;
+    let mut v = vec![s.prefix(), s.user("one"), s.request()];
+    v.extend(s.respond(
+        r#"[{"type":"tool_use","id":"toolu_01","name":"edit","input":{}},{"type":"tool_use","id":"toolu_02","name":"look","input":{}}]"#,
+        &[("toolu_01", "edit"), ("toolu_02", "look")],
+    ));
+    v.push(s.result("toolu_01", "done"));
+    append(store, &s, v).await;
+    let end = || Body::TurnEnd {
+        outcome: "interrupted".into(),
+    };
+    refused(store, &s, end()).await;
+    let r = s.result("toolu_02", "cut short by an interrupt");
+    let e = s.push(end());
+    append(store, &s, vec![r, e]).await;
+    assert!(s.log.resume().at_boundary());
+}
+
+async fn tool_entries_name_a_call_that_was_asked_for<S: LogStore>(store: &S) {
+    let mut s = new_session(store).await;
+    let mut v = vec![s.prefix(), s.user("one"), s.request()];
+    v.extend(s.respond(
+        r#"[{"type":"tool_use","id":"toolu_01","name":"edit","input":{}}]"#,
+        &[("toolu_01", "edit")],
+    ));
+    append(store, &s, v).await;
+    refused(
+        store,
+        &s,
+        Body::ToolStart {
+            call: "nope".into(),
+            tool: "edit".into(),
+            effect: Effect::Write,
+        },
+    )
+    .await;
+    let block = raw(r#"{"type":"tool_result","tool_use_id":"nope","content":"x"}"#);
+    refused(
+        store,
+        &s,
+        Body::ToolResult {
+            call: "nope".into(),
+            block,
+            is_error: false,
+            spill: None,
+        },
+    )
+    .await;
+    let v = vec![s.result("toolu_01", "done"), s.end()];
+    append(store, &s, v).await;
+    // After the turn ends, no call is open: even the old id is refused.
+    refused(
+        store,
+        &s,
+        Body::ToolStart {
+            call: "toolu_01".into(),
+            tool: "edit".into(),
+            effect: Effect::Write,
+        },
+    )
+    .await;
+}
+
+async fn entry_fields_are_checked<S: LogStore>(store: &S) {
+    let mut s = new_session(store).await;
+    let v = vec![s.prefix(), s.user("one")];
+    append(store, &s, v).await;
+    let recipe = s.log.next_recipe(raw("{}")).unwrap();
+    refused(
+        store,
+        &s,
+        Body::ModelRequest {
+            recipe,
+            sha256: "A".repeat(64),
+            compaction: None,
+        },
+    )
+    .await;
+    let start = |reason, strategy| Body::SegmentStart {
+        reason,
+        strategy,
+        seed: vec![Seq(2)],
+        replaces: None,
+    };
+    refused(store, &s, start(SegmentReason::Compaction, None)).await;
+    refused(
+        store,
+        &s,
+        start(
+            SegmentReason::Fork,
+            Some(sarathi_log::Strategy::Deterministic),
+        ),
+    )
+    .await;
+    refused(
+        store,
+        &s,
+        start(
+            SegmentReason::ProtocolSwitch,
+            Some(sarathi_log::Strategy::Server),
+        ),
+    )
+    .await;
+    let ok = s.push(start(SegmentReason::Fork, None));
+    append(store, &s, vec![ok]).await;
+}
+
 macro_rules! conformance {
     ($($name:ident),* $(,)?) => {
         mod memory {
@@ -336,6 +496,10 @@ conformance!(
     fork_projects_the_parents_next_request,
     a_compaction_segment_projects_its_seed_and_its_own_slices,
     a_seed_batch_cut_short_leaves_the_old_segment_as_it_was,
+    an_interrupted_model_call_ends_with_its_turn,
+    a_turn_ends_only_once_its_calls_are_answered,
+    tool_entries_name_a_call_that_was_asked_for,
+    entry_fields_are_checked,
 );
 
 #[tokio::test(flavor = "multi_thread")]

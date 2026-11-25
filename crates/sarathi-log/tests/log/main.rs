@@ -8,5 +8,6 @@ mod common;
 mod conformance;
 mod crash;
 mod fixtures;
+mod generated;
 mod jsonl;
 mod seed;

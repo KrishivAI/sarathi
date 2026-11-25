@@ -506,7 +506,8 @@ pub fn render_log(log: &Log) -> Result<String, LogError> {
 /// line that does not decode, or breaks a log invariant, is corruption.
 ///
 /// # Errors
-/// [`LogError::Corrupt`], [`LogError::Format`] or [`LogError::MustUnderstand`].
+/// [`LogError::Corrupt`], [`LogError::Format`] or [`LogError::MustUnderstand`]; [`LogError::ForkMismatch`] for a
+/// fork whose copy of its parent's entries was changed.
 pub fn read_log(bytes: &[u8]) -> Result<ReadLog, LogError> {
     let good_len = bytes.iter().rposition(|b| *b == b'\n').map_or(0, |i| i + 1);
     let torn_bytes = (bytes.len() - good_len) as u64;
@@ -535,6 +536,7 @@ pub fn read_log(bytes: &[u8]) -> Result<ReadLog, LogError> {
             detail: err.to_string(),
         })?;
     }
+    log.verify_fork()?;
     Ok(ReadLog {
         log,
         complete_len: good_len as u64,

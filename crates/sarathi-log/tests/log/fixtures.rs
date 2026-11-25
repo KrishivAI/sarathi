@@ -231,6 +231,18 @@ async fn check(path: &Path) {
         "fork-child.jsonl" => {
             let from = log.header().forked_from.unwrap();
             assert_eq!(from.seq, Seq(11));
+            // The header's digest is the parent's lines 1..=11 as the parent fixture holds them.
+            let parent = std::fs::read_to_string(path.with_file_name("fork-parent.jsonl")).unwrap();
+            let parent_header = decode_header(parent.lines().next().unwrap()).unwrap();
+            assert_eq!(from.session, parent_header.session);
+            let lines: String = parent
+                .lines()
+                .skip(1)
+                .take(11)
+                .map(|l| format!("{l}\n"))
+                .collect();
+            assert_eq!(sha256_hex(lines.as_bytes()), from.sha256.to_string());
+            assert_eq!(log.lines_sha256(Seq(11)).unwrap(), from.sha256);
             assert!(resume.at_boundary());
         }
         "unknown-kind.jsonl" => {

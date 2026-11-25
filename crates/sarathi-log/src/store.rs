@@ -54,6 +54,11 @@ pub trait LogStore: Send + Sync {
     ) -> impl Future<Output = Result<LogHeader, LogError>> + Send;
 
     /// Appends `entries` if the session's next seq is `expected`; all or none. Returns the next seq after them.
+    ///
+    /// "All or none" holds for a refused batch and within the process. A crash during a file store's append can
+    /// leave a prefix of the batch, in whole entries, which reads as a valid log: a writer orders a batch so every
+    /// prefix of it is a state it can resume from (a compaction's seeds before the `segment.start` naming them, a
+    /// fork's copied entries before its `segment.start`).
     fn append(
         &self,
         session: SessionId,
@@ -99,9 +104,7 @@ impl LogStore for MemoryStore {
         _durability: Durability,
     ) -> Result<Seq, LogError> {
         let mut map = self.sessions.lock().unwrap_or_else(PoisonError::into_inner);
-        let log = map
-            .get_mut(&session)
-            .ok_or_else(|| LogError::NotFound(session.to_string()))?;
+        let log = map.get_mut(&session).ok_or(LogError::NotFound(session))?;
         // The line codec must accept every entry, as the file store's would.
         for e in &entries {
             crate::line::encode_entry(e)?;
@@ -114,7 +117,7 @@ impl LogStore for MemoryStore {
         let log = map
             .get(&session)
             .cloned()
-            .ok_or_else(|| LogError::NotFound(session.to_string()))?;
+            .ok_or(LogError::NotFound(session))?;
         Ok(Loaded {
             log,
             recovered: None,

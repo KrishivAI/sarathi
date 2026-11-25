@@ -22,8 +22,14 @@ const LOCK_FILE: &str = "log.lock";
 
 /// Session logs as JSONL files under one root directory.
 ///
-/// A store holds the lock of every session it has created or loaded for writing, until it is dropped. A second
-/// store (in this process or another) over the same session reads it but cannot append: [`LogError::Locked`].
+/// [`LogStore::load`] and [`LogStore::append`] open a session for writing: the store takes the session's lock,
+/// repairs a torn tail (cuts it and records the loss in a `note`) and keeps the lock, the open file and the session
+/// in memory until [`JsonlStore::release`] or until the store is dropped. A second store (in this process or another)
+/// over the same session reads it but cannot append: [`LogError::Locked`]. A reader that must never take the lock or
+/// change the file (an audit, an eval report) uses [`JsonlStore::read`].
+///
+/// Opening a session holds the store's session table while the file is read, so the first use of a large session
+/// delays other sessions' first use and appends in the same store.
 ///
 /// File IO runs on the blocking pool, so the futures never block an async runtime's worker.
 #[derive(Debug, Clone)]
@@ -43,6 +49,9 @@ struct Writer {
     /// The file's length after the last complete append.
     len: u64,
     log: Log,
+    /// An append failed and its rollback failed too: the file may end in part of a batch. The next use re-opens the
+    /// session, which reads that part as a torn tail.
+    failed: bool,
     _lock: File,
 }
 
@@ -55,6 +64,22 @@ impl JsonlStore {
                 writers: Mutex::new(HashMap::new()),
             }),
         }
+    }
+
+    /// Reads a session without taking its lock or changing its file: a torn last line is left as it is and reported
+    /// with `repaired: false`.
+    ///
+    /// # Errors
+    /// As [`LogStore::load`].
+    pub async fn read(&self, session: SessionId) -> Result<Loaded, LogError> {
+        self.blocking(move |inner| inner.read(session)).await
+    }
+
+    /// Gives up a session this store opened for writing: its lock, file and in-memory copy. An append in progress
+    /// keeps them until it returns. The next `load` or `append` opens the session again. Returns whether the store
+    /// held it.
+    pub fn release(&self, session: SessionId) -> bool {
+        self.inner.writers().remove(&session).is_some()
     }
 
     /// The path of a session's log file.
@@ -130,6 +155,7 @@ impl Inner {
                 file,
                 len: line.len() as u64,
                 log: Log::new(header.clone()),
+                failed: false,
                 _lock: lock,
             })),
         );
@@ -149,7 +175,7 @@ impl Inner {
         let dir = self.dir(session);
         let path = dir.join(LOG_FILE);
         if !path.exists() {
-            return Err(LogError::NotFound(session.to_string()));
+            return Err(LogError::NotFound(session));
         }
         let lock = lock_file(&dir, session)?;
         let read = read_file(&path)?;
@@ -186,6 +212,7 @@ impl Inner {
             file,
             len,
             log,
+            failed: false,
             _lock: lock,
         }));
         writers.insert(session, Arc::clone(&w));
@@ -201,6 +228,13 @@ impl Inner {
     ) -> Result<Seq, LogError> {
         let (w, _) = self.writer(session)?;
         let mut w = w.lock().unwrap_or_else(PoisonError::into_inner);
+        if w.failed {
+            // Taken from the table by the failed append; appending here would put this batch after its partial
+            // bytes, making a bad line in the middle of the file.
+            return Err(LogError::Io(io::Error::other(
+                "an earlier append to this session failed and could not be undone; retry to re-open it",
+            )));
+        }
         let mut buf = String::new();
         for e in &entries {
             buf.push_str(&encode_entry(e)?);
@@ -226,6 +260,7 @@ impl Inner {
                 w.log.truncate_to(len);
                 let prev = w.len;
                 if w.file.set_len(prev).is_err() {
+                    w.failed = true;
                     drop(w);
                     self.writers().remove(&session);
                 }
@@ -243,19 +278,25 @@ impl Inner {
                     recovered,
                 })
             }
-            Err(LogError::Locked(_)) => {
-                // Another writer holds it: read up to the last complete line, change nothing.
-                let read = read_file(&self.dir(session).join(LOG_FILE))?;
-                Ok(Loaded {
-                    log: read.log,
-                    recovered: (read.torn_bytes > 0).then_some(Recovered {
-                        truncated_bytes: read.torn_bytes,
-                        repaired: false,
-                    }),
-                })
-            }
+            // Another writer holds it: read up to the last complete line, change nothing.
+            Err(LogError::Locked(_)) => self.read(session),
             Err(e) => Err(e),
         }
+    }
+
+    fn read(&self, session: SessionId) -> Result<Loaded, LogError> {
+        let path = self.dir(session).join(LOG_FILE);
+        if !path.exists() {
+            return Err(LogError::NotFound(session));
+        }
+        let read = read_file(&path)?;
+        Ok(Loaded {
+            log: read.log,
+            recovered: (read.torn_bytes > 0).then_some(Recovered {
+                truncated_bytes: read.torn_bytes,
+                repaired: false,
+            }),
+        })
     }
 }
 
@@ -267,7 +308,7 @@ fn lock_file(dir: &Path, session: SessionId) -> Result<File, LogError> {
         .open(dir.join(LOCK_FILE))?;
     match lock.try_lock() {
         Ok(()) => Ok(lock),
-        Err(TryLockError::WouldBlock) => Err(LogError::Locked(session.to_string())),
+        Err(TryLockError::WouldBlock) => Err(LogError::Locked(session)),
         Err(TryLockError::Error(e)) => Err(e.into()),
     }
 }

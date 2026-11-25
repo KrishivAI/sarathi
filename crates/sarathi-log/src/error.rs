@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 //! [`LogError`]: every way reading or writing a session log can fail.
 
-use sarathi_protocol::Seq;
+use sarathi_protocol::{Seq, SessionId};
 
 /// A log operation that failed. No variant is retried by the store itself.
 #[derive(Debug, thiserror::Error)]
@@ -17,10 +17,10 @@ pub enum LogError {
     },
     /// No session with this id.
     #[error("no session {0}")]
-    NotFound(String),
+    NotFound(SessionId),
     /// The session is held by another writer (another process, or another store over the same directory).
     #[error("session {0} is locked by another writer")]
-    Locked(String),
+    Locked(SessionId),
     /// The log's format is one this reader does not read (newer, or older than N−1). It is never guessed at.
     #[error(transparent)]
     Format(#[from] sarathi_protocol::VersionError),
@@ -61,6 +61,16 @@ pub enum LogError {
         recorded: String,
         /// The hash of the rebuilt body.
         actual: String,
+    },
+    /// A forked session's copy of its parent's entries does not hash to the digest its header records.
+    #[error("the copy of the parent's entries 1..={} does not hash to the fork point's {recorded}", .at.0)]
+    ForkMismatch {
+        /// The fork point's seq.
+        at: Seq,
+        /// The digest in the header.
+        recorded: sarathi_protocol::Sha256,
+        /// The digest of the copied lines.
+        actual: sarathi_protocol::Sha256,
     },
     /// File IO failed.
     #[error("log IO: {0}")]

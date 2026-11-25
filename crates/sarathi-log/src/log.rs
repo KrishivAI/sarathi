@@ -4,7 +4,9 @@
 use sarathi_protocol::{MessageSlice, RawJson, Role, Seq};
 use sha2::{Digest, Sha256};
 
-use crate::entry::{Body, CallRef, Effect, Entry, LogHeader, Recipe, SegmentId, Strategy};
+use crate::entry::{
+    Body, CallRef, Effect, Entry, LogHeader, Recipe, SegmentId, SegmentReason, Strategy,
+};
 use crate::error::LogError;
 use crate::line::{content_slice, encode_entry};
 
@@ -171,7 +173,12 @@ impl Log {
     ///
     /// Invariants: seqs are dense; an entry stays in the current segment, except a `segment.start`, which opens the
     /// next one; references (`from`, `seed`, a recipe's `prefix` and `messages`) point back to entries of the right
-    /// kind; a `segment.start`'s `replaces` lies before it.
+    /// kind; a `segment.start`'s `replaces` lies before it and carries a `strategy` exactly when it is a compaction;
+    /// a `tool.start` or `tool.result` names a call the last assistant message asked for; a `turn.end` comes only
+    /// once every such call has its `tool.result`; a `model.request`'s `sha256` is 64 lower-case hex digits.
+    ///
+    /// A request's recipe is not rebuilt on append (the assembler lives with the provider): a log can hold a request
+    /// whose recipe does not rebuild to its hash, and [`Log::verify_requests`] finds it.
     ///
     /// # Errors
     /// [`LogError::Conflict`] if `expected` is not the next seq; [`LogError::Invalid`] for a broken invariant.
@@ -206,7 +213,25 @@ impl Log {
         }
         let seg = self.segment();
         match &e.body {
-            Body::SegmentStart { seed, replaces, .. } => {
+            Body::SegmentStart {
+                reason,
+                strategy,
+                seed,
+                replaces,
+            } => {
+                match (reason, strategy) {
+                    (SegmentReason::Compaction, None) => {
+                        return Err(invalid(
+                            "a compaction segment.start names its `strategy`".into(),
+                        ));
+                    }
+                    (SegmentReason::ProtocolSwitch | SegmentReason::Fork, Some(_)) => {
+                        return Err(invalid(
+                            "only a compaction segment.start has a `strategy`".into(),
+                        ));
+                    }
+                    _ => {}
+                }
                 if e.seg.0 != seg.0 + 1 {
                     return Err(invalid(format!(
                         "segment.start must open segment {}",
@@ -275,13 +300,58 @@ impl Log {
                 for s in &recipe.messages {
                     self.expect_slice(*s).map_err(invalid)?;
                 }
-                if sha256.len() != 64 || !sha256.bytes().all(|b| b.is_ascii_hexdigit()) {
-                    return Err(invalid("`sha256` is not 64 hex digits".into()));
+                if sha256.len() != 64
+                    || !sha256
+                        .bytes()
+                        .all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
+                {
+                    return Err(invalid("`sha256` is not 64 lower-case hex digits".into()));
+                }
+            }
+            Body::ToolStart { call, .. } | Body::ToolResult { call, .. } => {
+                if !self
+                    .asked()
+                    .is_some_and(|(_, asked)| asked.iter().any(|c| *c.id == **call))
+                {
+                    return Err(invalid(format!(
+                        "no open assistant message asked for call `{call}`"
+                    )));
+                }
+            }
+            Body::TurnEnd { .. } => {
+                if let Some((at, asked)) = self.asked()
+                    && let Some(open) = asked.iter().find(|c| !self.answered_after(at, &c.id))
+                {
+                    return Err(invalid(format!(
+                        "call `{}` has no tool.result: answer it before the turn ends",
+                        open.id
+                    )));
                 }
             }
             _ => {}
         }
         Ok(())
+    }
+
+    /// The last assistant message of the open turn and the calls it asked for: found walking back to the nearest
+    /// `message.assistant`, stopping at a `turn.end` or a user message that starts a turn.
+    fn asked(&self) -> Option<(usize, &[CallRef])> {
+        for (i, e) in self.entries.iter().enumerate().rev() {
+            match &e.body {
+                Body::AssistantMessage { calls, .. } => return Some((i, calls)),
+                Body::TurnEnd { .. } | Body::UserMessage { steer: false, .. } => return None,
+                _ => {}
+            }
+        }
+        None
+    }
+
+    /// A `tool.result` for `call` follows the entry at index `at`.
+    fn answered_after(&self, at: usize, call: &str) -> bool {
+        self.entries.get(at + 1..).is_some_and(|rest| {
+            rest.iter()
+                .any(|e| matches!(&e.body, Body::ToolResult { call: c, .. } if **c == *call))
+        })
     }
 
     /// The compactor of the call `response` answers, if that call is a compaction call: the `model.request` nearest
@@ -445,10 +515,17 @@ impl Log {
         let mut answered = false;
         for e in &self.entries {
             match &e.body {
-                Body::UserMessage { steer: false, .. } => in_turn = true,
+                // A new turn's request must carry its message: an older unanswered request is never made again.
+                Body::UserMessage { steer: false, .. } => {
+                    in_turn = true;
+                    last_request = None;
+                }
+                // The end of a turn closes it, model call included (an interrupt or a budget stop during a call writes
+                // no answer). Its tool calls are all answered: `turn.end` is refused otherwise.
                 Body::TurnEnd { .. } => {
                     in_turn = false;
                     calls.clear();
+                    last_request = None;
                 }
                 Body::ModelRequest { .. } => {
                     last_request = Some(e.seq);
@@ -523,6 +600,30 @@ impl Log {
             header: self.header.clone(),
             entries: self.entries[..n].to_vec(),
         })
+    }
+
+    /// Checks a forked session's copy of its parent: its lines `1..=at` hash to the digest its header records. A log
+    /// that is not a fork, or holds fewer than `at` entries (a fork cut short before its copy was written), passes.
+    ///
+    /// # Errors
+    /// [`LogError::ForkMismatch`] if the copy differs.
+    pub fn verify_fork(&self) -> Result<(), LogError> {
+        let Some(from) = &self.header.forked_from else {
+            return Ok(());
+        };
+        if usize::try_from(from.seq.0).map_or(true, |n| n > self.entries.len()) {
+            return Ok(());
+        }
+        let actual = self.lines_sha256(from.seq)?;
+        if actual == from.sha256 {
+            Ok(())
+        } else {
+            Err(LogError::ForkMismatch {
+                at: from.seq,
+                recorded: from.sha256,
+                actual,
+            })
+        }
     }
 
     /// Lower-case hex SHA-256 of the entry lines `1..=at`, each with its `\n`, as the JSONL store writes them.

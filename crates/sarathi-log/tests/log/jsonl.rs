@@ -182,3 +182,130 @@ async fn pretty_printed_slices_come_back_byte_for_byte_from_the_file() {
     assert_eq!(data.as_str(), pretty);
     assert_eq!(data, &RawJson::from_text(pretty).unwrap());
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_read_only_read_takes_no_lock_and_repairs_nothing() {
+    let root = tempfile::tempdir().unwrap();
+    let (id, s) = written(root.path()).await;
+    let path = JsonlStore::new(root.path()).log_path(id);
+    let mut torn = std::fs::read(&path).unwrap();
+    torn.extend_from_slice(b"{\"seq\":12,");
+    std::fs::write(&path, &torn).unwrap();
+    let reader = JsonlStore::new(root.path());
+    let loaded = reader.read(id).await.unwrap();
+    assert_eq!(loaded.log, s.log);
+    assert_eq!(
+        loaded.recovered,
+        Some(Recovered {
+            truncated_bytes: 10,
+            repaired: false,
+        })
+    );
+    assert_eq!(std::fs::read(&path).unwrap(), torn, "the file is unchanged");
+    // The reader holds nothing: a writer opens the session while it is alive, and repairs the tail.
+    let writer = JsonlStore::new(root.path());
+    let w = writer.load(id).await.unwrap();
+    assert!(w.recovered.unwrap().repaired);
+    assert!(matches!(
+        reader.read(sarathi_log::new_session_id()).await,
+        Err(LogError::NotFound(_))
+    ));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_released_session_can_be_written_by_another_store() {
+    let root = tempfile::tempdir().unwrap();
+    let (id, mut s) = written(root.path()).await;
+    let first = JsonlStore::new(root.path());
+    first.load(id).await.unwrap();
+    let second = JsonlStore::new(root.path());
+    let u = s.user("again");
+    assert!(matches!(
+        second
+            .append(id, u.seq, vec![u.clone()], Durability::Durable)
+            .await,
+        Err(LogError::Locked(_))
+    ));
+    assert!(first.release(id));
+    assert!(!first.release(id));
+    second
+        .append(id, u.seq, vec![u], Durability::Durable)
+        .await
+        .unwrap();
+    // The first store reads it again from the file (and cannot write it while the second holds it).
+    assert_eq!(first.load(id).await.unwrap().log, s.log);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_fork_whose_copy_was_changed_is_refused() {
+    let root = tempfile::tempdir().unwrap();
+    let (id, _) = written(root.path()).await;
+    let store = JsonlStore::new(root.path());
+    let child = sarathi_log::fork(&store, id, Seq(11), 7).await.unwrap();
+    assert!(store.load(child).await.unwrap().log.verify_fork().is_ok());
+    drop(store);
+    let path = JsonlStore::new(root.path()).log_path(child);
+    let text = std::fs::read_to_string(&path).unwrap();
+    // The user message of the copied turn, edited in place: every line still decodes and keeps the invariants.
+    std::fs::write(&path, text.replacen("\"x\"", "\"y\"", 1)).unwrap();
+    let r = JsonlStore::new(root.path()).read(child).await;
+    assert!(
+        matches!(r, Err(LogError::ForkMismatch { at: Seq(11), .. })),
+        "{r:?}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_unknown_must_understand_kind_and_an_older_format_are_refused_on_load() {
+    let root = tempfile::tempdir().unwrap();
+    let (id, _) = written(root.path()).await;
+    let path = JsonlStore::new(root.path()).log_path(id);
+    let text = std::fs::read_to_string(&path).unwrap();
+    let line = r#"{"seq":12,"seg":0,"ts":1,"kind":"later.kind","must_understand":true,"x":1}"#;
+    std::fs::write(&path, format!("{text}{line}\n")).unwrap();
+    let r = JsonlStore::new(root.path()).load(id).await;
+    assert!(
+        matches!(&r, Err(LogError::MustUnderstand { seq: Seq(12), kind }) if kind == "later.kind"),
+        "{r:?}"
+    );
+    std::fs::write(
+        &path,
+        text.replacen("\"sarathi_log\":1", "\"sarathi_log\":0", 1),
+    )
+    .unwrap();
+    let r = JsonlStore::new(root.path()).load(id).await;
+    assert!(
+        matches!(
+            r,
+            Err(LogError::Format(
+                sarathi_protocol::VersionError::OlderFormat { .. }
+            ))
+        ),
+        "{r:?}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_crash_inside_a_batch_leaves_whole_entries_that_read_as_a_valid_log() {
+    let root = tempfile::tempdir().unwrap();
+    // `written` appends the prefix and a whole tool turn as one batch; a fork appends its copy and its start as one.
+    let (id, s) = written(root.path()).await;
+    let store = JsonlStore::new(root.path());
+    let child = sarathi_log::fork(&store, id, Seq(11), 7).await.unwrap();
+    drop(store);
+    for (session, total) in [(id, 11), (child, 12)] {
+        let path = JsonlStore::new(root.path()).log_path(session);
+        let full = std::fs::read_to_string(&path).unwrap();
+        for k in 0..=total {
+            let cut: String = full.lines().take(k + 1).map(|l| format!("{l}\n")).collect();
+            std::fs::write(&path, &cut).unwrap();
+            let loaded = JsonlStore::new(root.path()).read(session).await.unwrap();
+            assert_eq!(loaded.recovered, None, "{session} cut after entry {k}");
+            assert_eq!(loaded.log.entries().len(), k);
+            if session == id {
+                assert_eq!(loaded.log.entries(), &s.log.entries()[..k]);
+            }
+        }
+        std::fs::write(&path, &full).unwrap();
+    }
+}
