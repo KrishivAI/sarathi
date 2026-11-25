@@ -20,8 +20,10 @@ first message above is the original request; the turns below are the most recent
 pub struct Seed {
     /// The entries.
     pub entries: Vec<Entry>,
-    /// Earlier turns of the old segment kept besides the current one.
+    /// Earlier turns of the old segment kept besides the last one.
     pub kept_turns: usize,
+    /// The old segment's last turn was kept (always, while a turn is open).
+    pub kept_last: bool,
     /// The old segment's head (the slices before its first turn, such as a server compaction block) was kept.
     pub kept_head: bool,
 }
@@ -39,14 +41,18 @@ impl Seed {
 /// What to keep of the current segment.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Keep {
-    /// Turns before the current one to keep, at most (fewer when the segment has fewer).
+    /// Turns before the last one to keep, at most (fewer when the segment has fewer).
     pub turns: usize,
+    /// Keep the last turn. While a turn is open it is the current one and always kept, whatever this says; between
+    /// turns it is complete and may be dropped like the others (the next user message starts a new turn), which
+    /// is the only way on when the last turn alone does not fit.
+    pub last: bool,
     /// Keep the segment's head: the slices before its first turn, such as a server compaction block, which stays
     /// first. Without it, the session's first user message is put first instead.
     pub head: bool,
 }
 
-/// The deterministic seed that keeps the current turn and up to `keep.turns` turns before it.
+/// The deterministic seed that keeps the last turn (see [`Keep::last`]) and up to `keep.turns` turns before it.
 ///
 /// The new segment's seed is: the old segment's head if it has one and `keep.head` is set, otherwise the session's
 /// first user message (by seq, unless it is in the kept range); a new [`DROPPED_NOTE`] user message; then the kept
@@ -58,8 +64,8 @@ pub struct Keep {
 ///
 /// # Errors
 /// [`ContextError::NotAtBoundary`] if a tool call has no result or a model call is in flight;
-/// [`ContextError::NoUserMessage`] if the segment has no turn start; [`ContextError::NothingToDrop`] if nothing
-/// before the current turn can be dropped under `keep`; [`ContextError::Log`] for a log that does not resolve its own
+/// [`ContextError::NoUserMessage`] if the segment has no turn start; [`ContextError::NothingToDrop`] if the last
+/// turn is kept and nothing before it can be dropped under `keep`; [`ContextError::Log`] for a log that does not resolve its own
 /// slices or is out of seqs.
 pub fn deterministic_seed(log: &Log, keep: Keep, ts: u64) -> Result<Seed, ContextError> {
     if !log.resume().at_boundary() {
@@ -67,21 +73,28 @@ pub fn deterministic_seed(log: &Log, keep: Keep, ts: u64) -> Result<Seed, Contex
     }
     let shape = Shape::of(log)?;
     let keep_head = keep.head && shape.head > 0;
-    // The kept range must leave something out: turn 0 (and the head, if it is kept), at least.
-    let droppable = if keep_head || shape.head == 0 {
-        shape.starts.len() - 1
+    let keep_last = keep.last || log.resume().in_turn;
+    let last = *shape.starts.last().ok_or(ContextError::NoUserMessage)?;
+    let before_last = shape.starts.len() - 1;
+    // The kept range must leave something out: the last turn, or else turn 0 (and the head, if it is kept).
+    let most = if !keep_last {
+        before_last
+    } else if keep_head || shape.head == 0 {
+        before_last
+            .checked_sub(1)
+            .ok_or(ContextError::NothingToDrop)?
     } else {
-        shape.starts.len()
+        before_last
     };
-    if droppable == 0 {
-        return Err(ContextError::NothingToDrop);
-    }
-    let kept_turns = keep.turns.min(droppable - 1);
-    let first_kept = shape.starts.len() - 1 - kept_turns;
-    let cut = shape.starts[first_kept];
-    let current = *shape.starts.last().unwrap_or(&cut);
+    let kept_turns = keep.turns.min(most);
+    let cut = shape.starts[before_last - kept_turns];
+    let end = if keep_last {
+        shape.messages.len()
+    } else {
+        last
+    };
     let messages = &shape.messages;
-    let kept = &messages[cut..];
+    let kept = &messages[cut..end];
 
     let seg = log.segment();
     let mut next = log.next_seq();
@@ -113,7 +126,7 @@ pub fn deterministic_seed(log: &Log, keep: Keep, ts: u64) -> Result<Seed, Contex
         },
     )?);
     for (i, &s) in kept.iter().enumerate() {
-        let earlier_turn = cut + i < current;
+        let earlier_turn = cut + i < last;
         match log.get(s).map(|e| &e.body) {
             Some(Body::AssistantMessage { calls, .. }) if earlier_turn => {
                 let Slice::Assistant { content, .. } = log.slice(s)? else {
@@ -157,16 +170,19 @@ pub fn deterministic_seed(log: &Log, keep: Keep, ts: u64) -> Result<Seed, Contex
     Ok(Seed {
         entries,
         kept_turns,
+        kept_last: keep_last,
         kept_head: keep_head,
     })
 }
 
-/// The deterministic seed that keeps the most for which `fits` says the log with the seed appended fits: first with
-/// the segment's head kept, from `max_turns` earlier turns down to none, then without the head the same way.
+/// The deterministic seed that keeps the most for which `fits` says the log with the seed appended fits: the last
+/// turn kept, first with the segment's head kept, from `max_turns` earlier turns down to none, then without the head
+/// the same way; then, only between turns, the same two passes with the last turn dropped too, so a complete turn
+/// too large for the window does not block every later one.
 ///
 /// # Errors
-/// [`ContextError::DoesNotFit`] if even the current turn alone does not fit; any error of [`deterministic_seed`]
-/// other than [`ContextError::NothingToDrop`] for one of the two modes.
+/// [`ContextError::DoesNotFit`] if no seed fits (while a turn is open: even the current turn alone does not fit);
+/// any error of [`deterministic_seed`] other than [`ContextError::NothingToDrop`].
 pub fn shrink_to_fit(
     log: &Log,
     max_turns: usize,
@@ -179,11 +195,19 @@ pub fn shrink_to_fit(
     } else {
         &[false]
     };
+    let lasts: &[bool] = if log.resume().in_turn {
+        &[true]
+    } else {
+        &[true, false]
+    };
     let mut tried = false;
-    for &head in passes {
+    for (&last, &head) in lasts
+        .iter()
+        .flat_map(|l| passes.iter().map(move |h| (l, h)))
+    {
         let mut turns = max_turns;
         loop {
-            let seed = match deterministic_seed(log, Keep { turns, head }, ts) {
+            let seed = match deterministic_seed(log, Keep { turns, head, last }, ts) {
                 Ok(seed) => seed,
                 Err(ContextError::NothingToDrop) => break,
                 Err(e) => return Err(e),

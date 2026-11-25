@@ -19,7 +19,7 @@ pub struct ContextProfile {
     pub compact_at_percent: u8,
     /// An estimate within this percentage of a limit is checked with an exact count first.
     pub count_margin_percent: u8,
-    /// Turns before the current one the overflow fallback keeps, at most.
+    /// Turns before the last one the overflow fallback keeps, at most.
     pub max_kept_turns: usize,
     /// Who summarizes.
     pub compactor: Compactor,
