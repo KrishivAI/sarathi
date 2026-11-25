@@ -7,7 +7,9 @@ use serde::{Deserialize, Serialize};
 
 use crate::raw::RawJson;
 
-/// Token counts of one call, as the provider reported them. Missing and `null` counts are 0.
+/// Billed token counts of one call. Missing and `null` counts are 0. Where the provider leaves part of the call out
+/// of its top-level counts (Anthropic server compaction: `usage.iterations` of type `compaction`), that part is
+/// added, so these are what the call cost, not always the size of the context it ended with.
 ///
 /// Fixed shape: other crates build it with a struct literal, so a new field is a breaking change, made deliberately
 /// (a design note) and in every crate at once. A stored value missing a count reads it as 0.

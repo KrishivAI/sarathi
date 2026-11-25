@@ -142,8 +142,15 @@ struct Top<'a> {
 struct WireUsage {
     #[serde(flatten)]
     counts: Usage,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "lenient_iterations")]
     iterations: Option<Vec<Iteration>>,
+}
+
+/// `iterations` in a shape this does not read is left out, never a reason to refuse the answer (a logged answer is
+/// read again on resume).
+fn lenient_iterations<'de, D: Deserializer<'de>>(d: D) -> Result<Option<Vec<Iteration>>, D::Error> {
+    let v = serde_json::Value::deserialize(d)?;
+    Ok(serde_json::from_value(v).ok())
 }
 
 /// One sampling iteration of `usage.iterations`. Missing and `null` counts are 0.
@@ -425,6 +432,36 @@ mod tests {
                 input_tokens: 203_000,
                 output_tokens: 4_500,
                 cache_read_input_tokens: 7,
+                ..Usage::default()
+            }
+        );
+    }
+
+    #[test]
+    fn iterations_in_an_unknown_shape_are_left_out() {
+        for usage in [
+            r#"{"input_tokens":5,"iterations":{"type":"compaction"}}"#,
+            r#"{"input_tokens":5,"iterations":[{"type":"compaction","input_tokens":"many"}]}"#,
+            r#"{"input_tokens":5,"iterations":null}"#,
+        ] {
+            let body = format!(r#"{{"content":[],"usage":{usage}}}"#);
+            let r = parse(Bytes::from(body)).unwrap();
+            assert_eq!(r.view.usage.input_tokens, 5, "{usage}");
+        }
+    }
+
+    #[test]
+    fn a_compaction_iteration_with_null_or_missing_counts_adds_what_it_has() {
+        let r = parse(Bytes::from_static(
+            br#"{"content":[],"usage":{"input_tokens":1,"iterations":[{"type":"compaction","input_tokens":null,"output_tokens":3,"cache_read_input_tokens":4}]}}"#,
+        ))
+        .unwrap();
+        assert_eq!(
+            r.view.usage,
+            Usage {
+                input_tokens: 1,
+                output_tokens: 3,
+                cache_read_input_tokens: 4,
                 ..Usage::default()
             }
         );

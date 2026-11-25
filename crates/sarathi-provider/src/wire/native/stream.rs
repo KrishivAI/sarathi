@@ -634,8 +634,14 @@ mod tests {
         ])
         .unwrap();
         assert_eq!(r.view.stop_reason.as_deref(), Some("compaction"));
-        assert_eq!(r.view.usage.input_tokens, 144);
-        assert_eq!(r.view.usage.output_tokens, 276);
+        assert_eq!(
+            r.view.usage,
+            sarathi_protocol::Usage {
+                input_tokens: 144,
+                output_tokens: 276,
+                ..sarathi_protocol::Usage::default()
+            }
+        );
     }
 
     #[test]

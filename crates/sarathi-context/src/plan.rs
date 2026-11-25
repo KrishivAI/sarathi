@@ -4,7 +4,7 @@
 use sarathi_log::{Body, Log, Slice};
 use sarathi_protocol::{ErrorKind, Seq};
 
-use crate::compact::{Compactor, compactor_of};
+use crate::compact::{Compactor, block_types, compactor_of};
 use crate::error::ContextError;
 use crate::fallback::{Seed, shrink_to_fit};
 
@@ -69,7 +69,8 @@ pub enum ContextAction {
 ///
 /// With an accepted answer in the current segment that reports usage: that call's input (uncached, cache reads and
 /// writes) and output tokens, plus 2 tokens per 7 bytes of every slice it did not hold. Otherwise (no answer yet, or
-/// a provider that reports no usage): 2 per 7 bytes of the prefix and every slice.
+/// a provider that reports no usage): 2 per 7 bytes of the prefix and every slice. An answer holding a `compaction`
+/// block is read as one without usage: its usage is billed usage and includes the input that was compacted away.
 pub fn estimate(log: &Log) -> u64 {
     let seg = log.segment();
     let last = log
@@ -86,12 +87,14 @@ pub fn estimate(log: &Log) -> u64 {
         });
     let projection = log.projection();
     let mut bytes = 0usize;
-    let used = last.map_or(0, |(_, _, u)| {
-        u.input_tokens
-            .saturating_add(u.cache_read_input_tokens)
-            .saturating_add(u.cache_creation_input_tokens)
-            .saturating_add(u.output_tokens)
-    });
+    let used = last
+        .filter(|(answer, _, _)| !holds_compaction(log, *answer))
+        .map_or(0, |(_, _, u)| {
+            u.input_tokens
+                .saturating_add(u.cache_read_input_tokens)
+                .saturating_add(u.cache_creation_input_tokens)
+                .saturating_add(u.output_tokens)
+        });
     let base = match last {
         Some((answer, from, _)) if used > 0 => {
             let sent = request_before(log, from)
@@ -118,6 +121,12 @@ pub fn estimate(log: &Log) -> u64 {
     };
     let bytes = u64::try_from(bytes).unwrap_or(u64::MAX);
     base.saturating_add(bytes.saturating_mul(2).div_ceil(7))
+}
+
+/// Whether the assistant slice at `seq` holds a `compaction` block.
+fn holds_compaction(log: &Log, seq: Seq) -> bool {
+    matches!(log.slice(seq), Ok(Slice::Assistant { content, .. })
+        if block_types(&content).iter().any(|t| t == "compaction"))
 }
 
 /// What to do before the next request, from the [`estimate`] or, after [`ContextAction::CountTokens`], the exact
