@@ -88,8 +88,7 @@ pub fn deterministic_seed(log: &Log, keep: Keep, ts: u64) -> Result<Seed, Contex
     let mut entries = Vec::new();
     let mut seed = Vec::new();
     let mut push = |entries: &mut Vec<Entry>, body: Body| -> Result<Seq, ContextError> {
-        let seq = next;
-        next = Seq(next.0.checked_add(1).ok_or_else(|| out_of_seqs(seq))?);
+        let seq = next_seq(&mut next)?;
         entries.push(Entry { seq, seg, ts, body });
         Ok(seq)
     };
@@ -238,7 +237,14 @@ impl Shape {
     }
 }
 
-fn out_of_seqs(seq: Seq) -> ContextError {
+/// `*next`, and moves `next` on by one.
+pub(crate) fn next_seq(next: &mut Seq) -> Result<Seq, ContextError> {
+    let seq = *next;
+    *next = Seq(next.0.checked_add(1).ok_or_else(|| out_of_seqs(seq))?);
+    Ok(seq)
+}
+
+pub(crate) fn out_of_seqs(seq: Seq) -> ContextError {
     ContextError::Log(LogError::Invalid {
         seq,
         detail: "out of seqs or segments".into(),

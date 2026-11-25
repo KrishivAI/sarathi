@@ -44,6 +44,21 @@ pub enum ContextError {
     /// A value that is not the JSON it should be.
     #[error("{0}")]
     Json(#[from] RawJsonError),
+    /// Turn parameters that cannot take a `compaction` member.
+    #[error("compaction params: {0}")]
+    BadParams(String),
+    /// Server compaction instructions past the provider's limit.
+    #[error("compaction instructions of {0} characters are over the limit")]
+    InstructionsTooLong(usize),
+    /// No compaction call is pending, or it has no response yet.
+    #[error("no compaction call with a response is pending")]
+    NoCompaction,
+    /// The compaction call answered without a usable summary.
+    #[error("the compaction call returned no summary (stop reason {stop_reason:?})")]
+    CompactionFailed {
+        /// The response's stop reason, if it had one.
+        stop_reason: Option<String>,
+    },
     /// File IO failed.
     #[error("spill IO: {0}")]
     Io(#[from] std::io::Error),

@@ -1,11 +1,15 @@
 // SPDX-License-Identifier: Apache-2.0
-//! The deterministic fallback over scripted logs, and both spill stores.
+//! The deterministic fallback, compaction by a model call and the size decision over scripted logs, and both spill
+//! stores.
 
-#![expect(clippy::unwrap_used, reason = "test code")]
+#![expect(clippy::unwrap_used, clippy::panic, reason = "test code")]
 
 use sarathi_context::{
-    ContextError, DROPPED_NOTE, FsSpill, Keep, MemorySpill, SpillLimits, SpillRecord, SpillStore,
-    deterministic_seed, read_output, shrink_to_fit, spill_output, verify_spill,
+    COMPACTION_BETA, CompactionRequest, Compactor, ContextAction, ContextError, ContextProfile,
+    DROPPED_NOTE, FsSpill, Keep, MAX_INSTRUCTIONS, MemorySpill, SUMMARY_PREFIX, SpillLimits,
+    SpillRecord, SpillStore, before_request, carries_compaction_block, compaction_request,
+    compaction_seed, deterministic_seed, estimate, overflow_seed, pending_compaction, read_output,
+    shrink_to_fit, spill_output, verify_spill,
 };
 use sarathi_log::{
     Body, CallRef, Durability, Effect, Entry, JsonlStore, Log, LogStore, SegmentId, SegmentReason,
@@ -558,4 +562,453 @@ async fn spill_round_trip_fs() {
             .ends_with(".tmp")),
         "no temporary file is left"
     );
+}
+
+// Compaction by a model call.
+
+impl Script {
+    /// Logs `req` as a `model.request` and `body` (an Anthropic message) as its `model.response`; returns the
+    /// response's seq.
+    fn call(&mut self, req: &CompactionRequest, body: &str) -> Seq {
+        self.log
+            .append(self.log.next_seq(), req.entries.clone())
+            .unwrap();
+        self.push(Body::ModelRequest {
+            recipe: req.recipe.clone(),
+            sha256: "0".repeat(64),
+        });
+        self.response(body)
+    }
+
+    fn response(&mut self, body: &str) -> Seq {
+        // Every test body has `stop_reason` right after `content`.
+        let start = body.find(r#""content":"#).unwrap() + r#""content":"#.len();
+        let end = body.find(r#","stop_reason""#).unwrap();
+        self.push(Body::ModelResponse {
+            body: raw(body),
+            content: u32::try_from(start).unwrap()..u32::try_from(end).unwrap(),
+            sse: None,
+            request_id: None,
+            usage: Usage::default(),
+        })
+    }
+
+    /// A finished turn whose single answer reports `input` input tokens.
+    fn sized_turn(&mut self, n: u32, input: u64) {
+        self.user(&format!("task {n}"));
+        let recipe = self.log.next_recipe(raw("{}")).unwrap();
+        self.push(Body::ModelRequest {
+            recipe,
+            sha256: "0".repeat(64),
+        });
+        let body = format!(r#"{{"content":[{{"type":"text","text":"done {n}"}}]}}"#);
+        let from = self.push(Body::ModelResponse {
+            content: 11..u32::try_from(body.len() - 1).unwrap(),
+            body: RawJson::from_string(body).unwrap(),
+            sse: None,
+            request_id: None,
+            usage: Usage {
+                input_tokens: input,
+                ..Usage::default()
+            },
+        });
+        self.push(Body::AssistantMessage {
+            from,
+            calls: Vec::new(),
+        });
+        self.push(Body::TurnEnd {
+            outcome: "finished".into(),
+        });
+    }
+}
+
+const BLOCK: &str =
+    r#"[{"type":"compaction","content":"Summary: tasks 1-3 done.","signature":"c2ln"}]"#;
+
+fn server_answer(content: &str, stop: &str) -> String {
+    format!(
+        r#"{{"id":"msg_c","content":{content},"stop_reason":"{stop}","usage":{{"input_tokens":0}}}}"#
+    )
+}
+
+fn last_start(log: &Log) -> (Strategy, Vec<Seq>, std::ops::Range<Seq>) {
+    match &log.entries().last().unwrap().body {
+        Body::SegmentStart {
+            strategy: Some(st),
+            seed,
+            replaces: Some(r),
+            ..
+        } => (*st, seed.clone(), r.clone()),
+        other => panic!("expected a segment.start, got {other:?}"),
+    }
+}
+
+#[test]
+fn a_server_compaction_seeds_the_next_segment_with_the_block_byte_for_byte() {
+    let mut s = Script::new();
+    for n in 1..=3 {
+        s.turn(n);
+    }
+    let before = s.log.projection().messages;
+    let req = compaction_request(
+        &s.log,
+        Compactor::Server,
+        &raw(r#"{"model":"m","max_tokens":10}"#),
+        Some("Keep file paths."),
+        5,
+    )
+    .unwrap();
+    assert!(req.entries.is_empty());
+    assert_eq!(req.beta, Some(COMPACTION_BETA));
+    assert_eq!(req.recipe.messages, before);
+    assert_eq!(
+        req.recipe.params.as_str(),
+        r#"{"model":"m","max_tokens":10,"compaction":{"type":"summarize","instructions":"Keep file paths."}}"#
+    );
+    assert!(!carries_compaction_block(&s.log));
+
+    let resp = s.call(&req, &server_answer(BLOCK, "compaction"));
+    let pending = pending_compaction(&s.log).unwrap();
+    assert_eq!(pending.compactor, Compactor::Server);
+    assert_eq!(pending.response, Some(resp));
+    assert!(
+        !s.log.resume().at_boundary(),
+        "the call is open until its seed"
+    );
+
+    let seed = compaction_seed(&s.log, 6).unwrap();
+    let first_new = s.log.next_seq();
+    s.apply(&seed);
+    let (strategy, seed_seqs, replaces) = last_start(&s.log);
+    assert_eq!(strategy, Strategy::Server);
+    assert_eq!(seed_seqs, vec![first_new]);
+    assert_eq!(replaces, Seq(1)..first_new);
+    assert_eq!(s.log.projection().messages, vec![first_new]);
+    assert_eq!(text(&s.log, first_new), BLOCK, "the block's bytes are kept");
+    assert!(matches!(
+        s.log.get(first_new).unwrap().body,
+        Body::SegmentSeed { from: Some(f), .. } if f == resp
+    ));
+    assert!(s.log.resume().at_boundary());
+    assert_eq!(pending_compaction(&s.log), None);
+    assert!(carries_compaction_block(&s.log));
+
+    // The next turn sends the block first, then its own slices; a second compaction replaces the block too.
+    s.turn(4);
+    let req = compaction_request(&s.log, Compactor::Server, &raw("{}"), None, 7).unwrap();
+    assert_eq!(req.recipe.messages[0], first_new);
+    assert_eq!(
+        req.recipe.params.as_str(),
+        r#"{"compaction":{"type":"summarize"}}"#
+    );
+    s.call(&req, &server_answer(BLOCK, "compaction"));
+    let start_of_segment_1 = Seq(first_new.0 + 1);
+    let seed = compaction_seed(&s.log, 8).unwrap();
+    let newest = s.log.next_seq();
+    s.apply(&seed);
+    let (_, seed_seqs, replaces) = last_start(&s.log);
+    assert_eq!(seed_seqs, vec![newest], "only the newest block");
+    assert_eq!(replaces, start_of_segment_1..newest);
+}
+
+#[test]
+fn a_server_answer_without_a_block_fails_and_is_not_asked_again_until_the_next_turn() {
+    let mut s = Script::new();
+    for n in 1..=3 {
+        s.turn(n);
+    }
+    let req = compaction_request(&s.log, Compactor::Server, &raw("{}"), None, 5).unwrap();
+    for (content, stop) in [
+        ("[]", "max_tokens"),
+        (r#"[{"type":"text","text":"Sure!"}]"#, "end_turn"),
+        (r#"[{"type":"compaction","content":""}]"#, "compaction"),
+    ] {
+        let mut t = Script { log: s.log.clone() };
+        t.call(&req, &server_answer(content, stop));
+        match compaction_seed(&t.log, 6) {
+            Err(ContextError::CompactionFailed { stop_reason }) => {
+                assert_eq!(stop_reason.as_deref(), Some(stop));
+            }
+            other => panic!("{content}: {other:?}"),
+        }
+    }
+    s.call(&req, &server_answer("[]", "max_tokens"));
+    s.push(Body::ModelFailure {
+        error: "invalid_response".into(),
+        status: None,
+        detail: "no compaction block".into(),
+        request_id: None,
+        retries: 0,
+    });
+    assert_eq!(pending_compaction(&s.log), None);
+    let mut tiny = ContextProfile::new(10_000, 0);
+    tiny.compact_at_percent = 1;
+    assert_eq!(
+        before_request(&s.log, &tiny, Some(5_000)).unwrap(),
+        ContextAction::None,
+        "no second try in the same gap between turns"
+    );
+    s.turn(4);
+    assert_eq!(
+        before_request(&s.log, &tiny, Some(5_000)).unwrap(),
+        ContextAction::Compact(Compactor::Server)
+    );
+}
+
+#[test]
+fn a_client_summary_seeds_the_next_segment_with_one_user_message() {
+    let mut s = Script::new();
+    for n in 1..=2 {
+        s.turn(n);
+    }
+    let before = s.log.projection().messages;
+    let req =
+        compaction_request(&s.log, Compactor::ClientSummary, &raw("{}"), Some("x"), 5).unwrap();
+    assert_eq!(req.beta, None);
+    assert_eq!(req.entries.len(), 1);
+    let prompt = req.entries[0].seq;
+    assert_eq!(req.recipe.messages[..before.len()], before[..]);
+    assert_eq!(req.recipe.messages.last(), Some(&prompt));
+    assert_eq!(req.recipe.params.as_str(), "{}");
+
+    s.call(
+        &req,
+        r#"{"id":"m","content":[{"type":"text","text":"The user wants X."},{"type":"text","text":"Next: Y."}],"stop_reason":"end_turn"}"#,
+    );
+    assert_eq!(
+        s.log.projection().messages,
+        before,
+        "the prompt is not part of the conversation"
+    );
+    assert_eq!(
+        pending_compaction(&s.log).unwrap().compactor,
+        Compactor::ClientSummary
+    );
+    let seed = compaction_seed(&s.log, 6).unwrap();
+    let summary = s.log.next_seq();
+    s.apply(&seed);
+    let (strategy, seed_seqs, _) = last_start(&s.log);
+    assert_eq!(strategy, Strategy::ClientSummary);
+    assert_eq!(seed_seqs, vec![summary]);
+    assert_eq!(
+        text(&s.log, summary),
+        RawJson::string(&format!("{SUMMARY_PREFIX}The user wants X.\n\nNext: Y.")).as_str()
+    );
+    assert!(s.log.resume().at_boundary());
+    assert!(!carries_compaction_block(&s.log));
+
+    // An empty answer is no summary.
+    let mut t = Script::new();
+    t.turn(1);
+    let req = compaction_request(&t.log, Compactor::ClientSummary, &raw("{}"), None, 5).unwrap();
+    t.call(
+        &req,
+        r#"{"content":[{"type":"text","text":"  "}],"stop_reason":"end_turn"}"#,
+    );
+    assert!(matches!(
+        compaction_seed(&t.log, 6),
+        Err(ContextError::CompactionFailed { .. })
+    ));
+}
+
+#[test]
+fn a_compaction_cut_short_at_any_entry_resumes_from_where_it_stopped() {
+    for compactor in [Compactor::Server, Compactor::ClientSummary] {
+        let mut s = Script::new();
+        for n in 1..=2 {
+            s.turn(n);
+        }
+        let old = s.log.projection().messages;
+        let at_start = s.log.next_seq();
+        let req = compaction_request(&s.log, compactor, &raw("{}"), None, 5).unwrap();
+        let body = if compactor == Compactor::Server {
+            server_answer(BLOCK, "compaction")
+        } else {
+            r#"{"content":[{"type":"text","text":"sum"}],"stop_reason":"end_turn"}"#.to_owned()
+        };
+        s.call(&req, &body);
+        let seed = compaction_seed(&s.log, 6).unwrap();
+        s.apply(&seed);
+        let done = s.log.projection().messages;
+        let end = s.log.next_seq().0 - 1;
+        for cut in at_start.0 - 1..=end {
+            let log = s.log.up_to(Seq(cut)).unwrap();
+            let has_start = cut == end;
+            assert_eq!(
+                log.projection().messages,
+                if has_start { done.clone() } else { old.clone() },
+                "{compactor:?} cut at {cut}"
+            );
+            let pending = pending_compaction(&log);
+            let has_request = log
+                .entries()
+                .iter()
+                .skip(usize::try_from(at_start.0).unwrap() - 1)
+                .any(|e| matches!(e.body, Body::ModelRequest { .. }));
+            assert_eq!(
+                pending.is_some(),
+                has_request && !has_start,
+                "{compactor:?} cut at {cut}"
+            );
+            if let Some(p) = pending
+                && p.response.is_some()
+            {
+                // The answer is in the log: the seed is made again without a new call, the same as before.
+                let again = compaction_seed(&log, 6).unwrap();
+                let mut resumed = log.clone();
+                resumed.append(resumed.next_seq(), again.entries).unwrap();
+                assert_eq!(
+                    text(&resumed, resumed.projection().messages[0]),
+                    text(&s.log, done[0])
+                );
+            }
+        }
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_compacted_log_reads_back_from_a_file() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = JsonlStore::new(dir.path());
+    let header = store.create(1_764_057_600_000, None).await.unwrap();
+    let mut s = Script {
+        log: Log::new(header.clone()),
+    };
+    s.push(Body::SessionPrefix {
+        protocol: "anthropic-messages".into(),
+        system: raw(r#""be brief""#),
+        tools: raw("[]"),
+    });
+    s.turn(1);
+    let req = compaction_request(&s.log, Compactor::Server, &raw("{}"), None, 5).unwrap();
+    s.call(&req, &server_answer(BLOCK, "compaction"));
+    let seed = compaction_seed(&s.log, 6).unwrap();
+    s.apply(&seed);
+    store
+        .append(
+            header.session,
+            Seq(1),
+            s.log.entries().to_vec(),
+            Durability::Durable,
+        )
+        .await
+        .unwrap();
+    let back = store.load(header.session).await.unwrap().log;
+    assert_eq!(back, s.log);
+    assert!(carries_compaction_block(&back));
+}
+
+#[test]
+fn the_estimate_is_the_last_usage_plus_the_bytes_after_it() {
+    let mut s = Script::new();
+    // No answer yet: 2 tokens per 7 bytes of the prefix and slices.
+    let u = s.user("abcdefg");
+    let bytes = r#""be brief""#.len() + "[]".len() + RawJson::string("abcdefg").len();
+    assert_eq!(
+        estimate(&s.log),
+        u64::try_from(bytes * 2).unwrap().div_ceil(7)
+    );
+    let _ = u;
+    s.sized_turn(1, 1_000);
+    assert_eq!(estimate(&s.log), 1_000);
+    s.user("abcdefg");
+    assert_eq!(estimate(&s.log), 1_000 + 3);
+}
+
+#[test]
+fn before_request_counts_near_a_limit_compacts_between_turns_and_overflows_past_the_limit() {
+    let mut p = ContextProfile::new(100_000, 10_000);
+    p.compactor = Compactor::ClientSummary;
+    assert_eq!(p.limit(), 90_000);
+    assert_eq!(p.compact_at(), 75_000);
+    let mut s = Script::new();
+    s.sized_turn(1, 50_000);
+    assert_eq!(
+        before_request(&s.log, &p, None).unwrap(),
+        ContextAction::None
+    );
+    s.sized_turn(2, 70_000);
+    assert_eq!(
+        before_request(&s.log, &p, None).unwrap(),
+        ContextAction::CountTokens,
+        "within 10% of 75,000"
+    );
+    assert_eq!(
+        before_request(&s.log, &p, Some(74_000)).unwrap(),
+        ContextAction::None
+    );
+    assert_eq!(
+        before_request(&s.log, &p, Some(76_000)).unwrap(),
+        ContextAction::Compact(Compactor::ClientSummary)
+    );
+    // Inside a turn there is no compaction, only overflow.
+    s.user("next");
+    assert_eq!(
+        before_request(&s.log, &p, Some(76_000)).unwrap(),
+        ContextAction::None
+    );
+    assert_eq!(
+        before_request(&s.log, &p, Some(95_000)).unwrap(),
+        ContextAction::Overflow
+    );
+    // An open tool call: no decision at all.
+    s.respond(
+        r#"[{"type":"tool_use","id":"toolu_x","name":"edit","input":{}}]"#,
+        &["toolu_x"],
+    );
+    assert!(matches!(
+        before_request(&s.log, &p, None),
+        Err(ContextError::NotAtBoundary)
+    ));
+}
+
+#[test]
+fn the_overflow_seed_fits_the_limit_by_estimate() {
+    let mut s = Script::new();
+    for n in 1..=6 {
+        s.turn(n);
+    }
+    let mut p = ContextProfile::new(400, 0);
+    p.max_kept_turns = 5;
+    let seed = overflow_seed(&s.log, &p, 9).unwrap();
+    s.apply(&seed);
+    assert!(estimate(&s.log) <= 400);
+    assert!(seed.kept_turns < 5);
+    let tiny = ContextProfile::new(1, 0);
+    let mut t = Script::new();
+    for n in 1..=2 {
+        t.turn(n);
+    }
+    assert!(matches!(
+        overflow_seed(&t.log, &tiny, 9),
+        Err(ContextError::DoesNotFit)
+    ));
+}
+
+#[test]
+fn compaction_needs_a_boundary_and_object_params() {
+    let mut s = Script::new();
+    s.user("task");
+    s.respond(
+        r#"[{"type":"tool_use","id":"toolu_1","name":"edit","input":{}}]"#,
+        &["toolu_1"],
+    );
+    assert!(matches!(
+        compaction_request(&s.log, Compactor::Server, &raw("{}"), None, 1),
+        Err(ContextError::NotAtBoundary)
+    ));
+    s.result("toolu_1");
+    assert!(matches!(
+        compaction_request(&s.log, Compactor::Server, &raw("[]"), None, 1),
+        Err(ContextError::BadParams(_))
+    ));
+    let long = "x".repeat(MAX_INSTRUCTIONS + 1);
+    assert!(matches!(
+        compaction_request(&s.log, Compactor::Server, &raw("{}"), Some(&long), 1),
+        Err(ContextError::InstructionsTooLong(n)) if n == MAX_INSTRUCTIONS + 1
+    ));
+    assert!(matches!(
+        compaction_seed(&s.log, 1),
+        Err(ContextError::NoCompaction)
+    ));
 }
