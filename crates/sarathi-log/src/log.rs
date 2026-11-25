@@ -350,6 +350,8 @@ impl Log {
         Ok(())
     }
 
+    /// A fork cut short before its `segment.start` is an orphan: readable, but nothing can be appended to it.
+    ///
     /// In a forked session, the entry after the copy of the parent's lines is the fork's `segment.start`, and it is
     /// accepted only if the copy hashes to the header's digest. So a log a store accepted never fails
     /// [`Log::verify_fork`], and a fork cut short (or repaired) before its `segment.start` stays a readable prefix.
@@ -357,7 +359,7 @@ impl Log {
         let Some(from) = &self.header.forked_from else {
             return Ok(());
         };
-        if e.seq.0 != from.seq.0 + 1 {
+        if from.seq.0.checked_add(1) != Some(e.seq.0) {
             return Ok(());
         }
         if !matches!(
