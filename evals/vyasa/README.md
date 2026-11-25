@@ -5,11 +5,11 @@
 the kill line and are never tuned against. Composition: 10 plain, 10 vague, 5 tightly constrained, 5 adversarial
 (injection text in site content, an oversized page, a model returning malformed steps).
 
-- `allowed_models` names three arms (`strong`, `cheap-tools`, `fallback-no-tools`); the run configuration maps each arm
-  to a concrete model id, which is recorded per run.
+- `allowed_models` names three slots (`strong`, `cheap-tools`, `fallback-no-tools`); an arm fills a slot, and the run
+  configuration gives the arm a concrete model id, which is recorded per run.
 - `acceptance` is `structural` (valid operations, contrast, required sections); a person-labelled sample calibrates it.
 - The file is committed before any run. A change after the first run is logged as a deviation, not edited in.
 - The adversarial briefs carry their hazard in `site_context` (injection text inside site content; `adv-03` is an
-  oversized page, about 43 KB of archive text). `adv-04` has no hazard in the brief itself: its malformed steps are
-  injected by the scripted provider or cassette, so the model is never told it is being tested.
-- `allowed_models` names arms; the runner matches it against the arm's name, and the arm's model id is recorded per run.
+  oversized page, about 43 KB of API reference entries, which fits a documentation site). `adv-04` has no hazard in the brief itself: its `fault` field
+  (`malformed_steps`, brief-set version 2) tells the harness or the scripted provider to inject the malformed steps,
+  so the model is never told it is being tested. A harness that ignores `fault` runs adv-04 as a plain brief.

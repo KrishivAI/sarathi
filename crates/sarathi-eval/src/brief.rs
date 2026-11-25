@@ -6,8 +6,8 @@ use std::collections::BTreeSet;
 
 use serde::{Deserialize, Serialize};
 
-/// The brief-set format version this crate writes. It reads this version and the one before.
-pub const BRIEF_SET_VERSION: u32 = 1;
+/// The brief-set format version this crate writes (2 added `fault`). It reads this version and the one before.
+pub const BRIEF_SET_VERSION: u32 = 2;
 
 /// Which part of the set a brief belongs to. Only `Tuning` briefs may drive a prompt or profile change.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -35,6 +35,10 @@ pub struct Brief {
     pub allowed_models: Vec<String>,
     /// Name of the acceptance check that judges the run.
     pub acceptance: String,
+    /// A fault the harness or the scripted provider must inject into this run (for example `malformed_steps`),
+    /// so the model is never told it is being tested. Version 2; absent in version 1 sets.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fault: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -164,6 +168,7 @@ mod tests {
             text: "warm palette".into(),
             allowed_models: vec!["m".into()],
             acceptance: "structural".into(),
+            fault: None,
         }
     }
 
@@ -221,8 +226,8 @@ mod tests {
     fn header_rules() {
         assert_eq!(parse_brief_set(""), Err(BriefError::Empty));
         assert_eq!(
-            parse_brief_set("{\"sarathi_brief_set\":2}"),
-            Err(BriefError::Version(2))
+            parse_brief_set("{\"sarathi_brief_set\":3}"),
+            Err(BriefError::Version(3))
         );
         assert!(matches!(
             parse_brief_set("{\"id\":\"a\"}"),
@@ -232,5 +237,15 @@ mod tests {
             parse_brief_set("{\"sarathi_brief_set\":1}\n").unwrap(),
             vec![]
         );
+    }
+
+    #[test]
+    fn a_fault_survives_a_round_trip_and_a_version_1_set_still_reads() {
+        let mut b = brief("a", Split::Measurement);
+        b.fault = Some("malformed_steps".into());
+        let text = write_brief_set(&[b.clone()]).unwrap();
+        assert_eq!(parse_brief_set(&text).unwrap(), vec![b]);
+        let v1 = "{\"sarathi_brief_set\":1}\n{\"id\":\"a\",\"split\":\"tuning\",\"site_context\":\"\",\"text\":\"t\",\"allowed_models\":[\"m\"],\"acceptance\":\"s\"}";
+        assert_eq!(parse_brief_set(v1).unwrap()[0].fault, None);
     }
 }

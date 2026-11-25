@@ -37,3 +37,14 @@ fn every_kind_has_briefs_in_both_splits() {
         }
     }
 }
+
+#[test]
+fn adv_04_names_its_injected_fault_and_no_other_brief_does() {
+    let briefs = parse_brief_set(SET).unwrap();
+    let faulty: Vec<_> = briefs
+        .iter()
+        .filter(|b| b.fault.is_some())
+        .map(|b| (b.id.as_str(), b.fault.as_deref()))
+        .collect();
+    assert_eq!(faulty, vec![("adv-04", Some("malformed_steps"))]);
+}
