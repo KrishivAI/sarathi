@@ -73,7 +73,7 @@ fn message(content: &str, stop: &str, input: u64, output: u64) -> String {
 /// The model: answers a request from its bytes alone, and keeps every body it was sent.
 ///
 /// A compaction call gets a block (server) or a summary (client) naming the task the run is on; a turn request whose
-/// task's tool call has no answer yet gets a thinking block and a `look` call; one that has it gets `done <n>`.
+/// task's tool call has no answer yet gets a thinking block and an `edit` call (a write); one that has it gets `done <n>`.
 /// With `refuse`, the first request of that task is refused once as too large.
 #[derive(Debug, Clone, Default)]
 struct Long {
@@ -132,7 +132,7 @@ impl Long {
             ));
         }
         let blocks = format!(
-            r#"{{"type":"thinking","thinking":"plan {n}","signature":"sig{n}"}},{{"type":"tool_use","id":"toolu_{n}","name":"look","input":{{"n":{n}}}}}"#
+            r#"{{"type":"thinking","thinking":"plan {n}","signature":"sig{n}"}},{{"type":"tool_use","id":"toolu_{n}","name":"edit","input":{{"n":{n}}}}}"#
         );
         Ok(message(&blocks, "tool_use", input, 30))
     }
@@ -193,7 +193,7 @@ impl ModelCaller for Long {
     }
 }
 
-/// `look` returns [`RESULT_BYTES`] of output.
+/// Every tool returns [`RESULT_BYTES`] of output (the run calls `edit`, a write, so each call is started durably).
 #[derive(Debug, Clone, Default)]
 struct Big;
 
@@ -421,6 +421,14 @@ fn check_requests(log: &Log) {
     }
 }
 
+/// The projection right after each segment start: what every compaction left.
+fn projections_at_segments(log: &Log) -> Vec<Vec<String>> {
+    segments(log)
+        .iter()
+        .map(|s| projected(&log.up_to(s.0).unwrap()))
+        .collect()
+}
+
 /// The compactions of the log: the seqs from each compaction request to the segment start it ends in.
 fn compactions(log: &Log) -> Vec<(Seq, Seq)> {
     let starts = segments(log);
@@ -484,18 +492,17 @@ async fn check_long_run(compactor: Compactor) {
     assert!(estimate(&log) <= context.limit());
     check_requests(&log);
     let full = projected(&log);
+    let at_starts = projections_at_segments(&log);
 
     // A restart after any append of a compaction, or just before it, ends in the same conversation.
     let appends = store.starts.lock().unwrap().clone();
     let mut sent_again = 0;
     for (first, last) in &batches {
-        let cuts: Vec<u32> = appends
-            .iter()
-            .enumerate()
-            .filter(|(_, s)| *s >= first && *s <= last)
-            .map(|(i, _)| u32::try_from(i).unwrap())
-            .collect();
-        let (lo, hi) = (cuts[0], cuts[cuts.len() - 1] + 1);
+        // From the append that wrote the batch's first entry (a client summary writes its prompt with the request),
+        // through one past the append of its segment start.
+        let lo = appends.iter().rposition(|s| s <= first).unwrap();
+        let hi = appends.iter().rposition(|s| s <= last).unwrap() + 1;
+        let (lo, hi) = (u32::try_from(lo).unwrap(), u32::try_from(hi).unwrap());
         for n in lo..=hi {
             let model = Long::default();
             let store = Recording {
@@ -527,6 +534,11 @@ async fn check_long_run(compactor: Compactor) {
             check_log(resumed);
             check_requests(resumed);
             assert_eq!(projected(resumed), full, "{compactor:?} n={n}");
+            assert_eq!(
+                projections_at_segments(resumed),
+                at_starts,
+                "{compactor:?} n={n}"
+            );
             assert_eq!(
                 compactions(resumed).len(),
                 batches.len(),
@@ -594,6 +606,19 @@ async fn a_refused_request_mid_run_is_recovered_without_a_model_call() {
             .any(|s| slice_text(&log, *s).contains(r#""type":"tool_use""#)),
         "the overflow seed kept no earlier turn (refused task {refuse})"
     );
+    // The seed's request starts with the server block of the compaction before it.
+    assert!(slice_text(&log, kept[0]).contains(r#""type":"compaction""#));
+    // The turn ended on the refusal: one model failure, a context overflow. The task is not sent again.
+    let failures: Vec<String> = log
+        .entries()
+        .iter()
+        .filter_map(|e| match &e.body {
+            Body::ModelFailure { error, .. } => Some(error.to_string()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(failures.len(), 1, "{failures:?}");
+    assert!(failures[0].contains("overflow"), "{failures:?}");
     let batches = compactions(&log);
     assert!(batches.len() >= 2);
     check_requests(&log);
