@@ -9,7 +9,8 @@
 //! slot is still below its cap (from the cost of the runs already recorded) runs whole; once the slot reaches its cap,
 //! every later group of the slot is skipped. So the harnesses of a stopped slot always ran the same (brief, repetition)
 //! set and their stats stay comparable, and a slot can overshoot its cap by at most one group (one run per harness).
-//! Provider-side spending limits on the keys are the hard stop; the cap is the measurement's own.
+//! That bound is in runs, not dollars: it bounds money only while one run's cost is bounded, which the provider-side
+//! spending limits on the keys ensure. Those limits are the hard stop; the cap is the measurement's own.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -184,8 +185,23 @@ pub struct CappedRun {
     /// Every run made, in plan order.
     pub records: Vec<RunRecord>,
     /// Slots whose cap was reached: their remaining groups were not run, so their arms are incomplete. Pass them on to
-    /// the report ([`crate::report::Report::stopped`]) and the kill line ([`crate::killline::ArmPair::stopped`]).
+    /// the report ([`CappedRun::stopped_slots`]) and the kill line ([`CappedRun::slot_stopped`]).
     pub stopped: BTreeSet<String>,
+}
+
+impl CappedRun {
+    /// Whether `slot` stopped at its cap: the value for [`crate::killline::ArmPair::stopped`] of the arm pair on
+    /// that slot.
+    #[must_use]
+    pub fn slot_stopped(&self, slot: &str) -> bool {
+        self.stopped.contains(slot)
+    }
+
+    /// The stopped slots, sorted: the value for [`crate::report::Report::stopped`].
+    #[must_use]
+    pub fn stopped_slots(&self) -> Vec<String> {
+        self.stopped.iter().cloned().collect()
+    }
 }
 
 /// A budgeted run refused before it started.

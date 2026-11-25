@@ -189,6 +189,9 @@ fn a_slot_stops_at_its_cap_and_the_others_run_on() {
         out.stopped.iter().map(String::as_str).collect::<Vec<_>>(),
         ["strong"]
     );
+    assert!(out.slot_stopped("strong"));
+    assert!(!out.slot_stopped("cheap-tools"));
+    assert_eq!(out.stopped_slots(), ["strong"]);
     let spent = spent_by_slot(&out.records, &c.price_table()).unwrap();
     assert_eq!(spent["strong"], 8_000_000);
     assert_paired(&out.records, "strong", &["old", "new"]);
