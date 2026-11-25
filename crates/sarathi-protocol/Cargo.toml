@@ -8,5 +8,11 @@ license.workspace = true
 repository.workspace = true
 publish.workspace = true
 
+[dependencies]
+serde.workspace = true
+# `raw_value`: provider bytes are held as they arrived (never re-serialised).
+serde_json = { workspace = true, features = ["raw_value"] }
+thiserror.workspace = true
+
 [lints]
 workspace = true
