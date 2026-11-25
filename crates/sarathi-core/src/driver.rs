@@ -115,6 +115,9 @@ pub enum DriverError {
 }
 
 /// Sends ops to a running driver from any task.
+///
+/// The driver runs every tool call through its toolbox, so an [`Op::ToolOutput`] for the call it is running is
+/// refused with an [`Event::Error`] and the call keeps running.
 #[derive(Debug, Clone)]
 pub struct Handle {
     tx: mpsc::UnboundedSender<Op>,
@@ -825,6 +828,17 @@ where
                     }
                 }
                 op = ops.recv(), if !closed => match op {
+                    // The driver's toolbox runs this call: an answer from the host would end the call while its
+                    // future is still running, and the next call would drop that future mid-run.
+                    Some(Op::ToolOutput { call, .. })
+                        if matches!(&flight, Some(Flight::Tool { call: c, .. }) if *c == call) =>
+                    {
+                        on_event(Event::Error {
+                            kind: ErrorKind::InvalidRequest,
+                            detail: format!("call {call} is run by the driver's toolbox, not the host").into(),
+                        });
+                        continue;
+                    }
                     Some(op) => Input::Op(op),
                     None => {
                         closed = true;

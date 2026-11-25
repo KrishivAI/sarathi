@@ -362,6 +362,46 @@ async fn a_write_that_ignores_the_stop_is_abandoned_after_its_grace() {
     check_log(d.log());
 }
 
+#[tokio::test(start_paused = true)]
+async fn a_host_output_for_a_call_the_toolbox_runs_is_refused_and_the_call_finishes() {
+    let p = ModelProfile::native();
+    let tools = TestTools {
+        edit_takes: Some(Duration::from_secs(5)),
+        edit_stops: true,
+        ..TestTools::default()
+    };
+    let replies = vec![call(&p, 1, "edit", "{}"), done(&p, "edited")];
+    let (mut d, model, _) = driver(p, 5, replies, tools.clone()).await;
+    let handle = d.handle();
+    let mut refused = Vec::new();
+    let end = d
+        .run_turn(user("Edit."), &mut |e| match e {
+            Event::ToolStarted { call, .. } => {
+                handle.send(Op::ToolOutput {
+                    call,
+                    output: sarathi_protocol::ToolOutput {
+                        content: raw("\"from the host\""),
+                        is_error: false,
+                    },
+                });
+            }
+            Event::Error { kind, detail } => refused.push((kind, detail)),
+            _ => {}
+        })
+        .await
+        .unwrap();
+    assert_eq!(end.outcome, Outcome::Finished);
+    assert_eq!(model.left(), 0);
+    assert_eq!(refused.len(), 1, "{refused:?}");
+    assert_eq!(refused[0].0, ErrorKind::InvalidRequest);
+    assert!(refused[0].1.contains("toolbox"), "{refused:?}");
+    let r = results(d.log());
+    assert_eq!(r.len(), 1, "{r:?}");
+    assert!(!r[0].1.contains("from the host"), "{r:?}");
+    assert_eq!(tools.tally.writes.load(Ordering::SeqCst), 1);
+    check_log(d.log());
+}
+
 /// The scenario every resume test runs: a step that reads and writes, then a final answer.
 fn scenario(p: &ModelProfile) -> Vec<Reply> {
     if p.protocol == sarathi_core::StepProtocol::Native {
