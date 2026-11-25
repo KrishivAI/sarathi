@@ -9,9 +9,11 @@ use serde_json::value::RawValue;
 
 use crate::error::ContextError;
 
-/// The user message a deterministic seed puts after the session's first user message.
+/// The user message a deterministic seed puts before the kept turns. It says only what holds for every seed: the
+/// message before it may be the session's first user message, the old segment's head (an earlier summary or
+/// compaction block), or nothing, when the first user message is among the kept turns.
 pub const DROPPED_NOTE: &str = "[Earlier turns of this conversation were removed to fit the context window. The \
-first message above is the original request; the turns below are the most recent ones.]";
+turns after this note are the most recent ones.]";
 
 /// The entries a compaction appends, in order: new `segment.seed` slices, then the `segment.start` that seeds the
 /// new segment with them. Append them in one batch at [`Log::next_seq`] of the log they were made from. A batch cut
