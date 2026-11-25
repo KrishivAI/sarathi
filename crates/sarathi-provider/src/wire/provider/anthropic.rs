@@ -306,6 +306,8 @@ pub(crate) fn parse(body: &[u8]) -> Result<ChatResponse, TranslateError> {
             kind => return Err(unsupported_block(kind)),
         }
     }
+    // No `usage.iterations` here: this path never sends `compaction` (server compaction runs only on the native
+    // call), so the top-level counts are the whole call.
     let usage = v.get("usage").filter(|u| u.is_object()).map(|u| Usage {
         input_tokens: saturate(u["input_tokens"].as_u64().unwrap_or(0)),
         output_tokens: saturate(u["output_tokens"].as_u64().unwrap_or(0)),

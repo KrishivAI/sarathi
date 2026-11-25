@@ -146,11 +146,18 @@ struct WireUsage {
     iterations: Option<Vec<Iteration>>,
 }
 
-/// `iterations` in a shape this does not read is left out, never a reason to refuse the answer (a logged answer is
-/// read again on resume).
+/// An iteration in a shape this does not read is left out (the others still count), never a reason to refuse the
+/// answer (a logged answer is read again on resume).
 fn lenient_iterations<'de, D: Deserializer<'de>>(d: D) -> Result<Option<Vec<Iteration>>, D::Error> {
-    let v = serde_json::Value::deserialize(d)?;
-    Ok(serde_json::from_value(v).ok())
+    Ok(match serde_json::Value::deserialize(d)? {
+        serde_json::Value::Array(items) => Some(
+            items
+                .into_iter()
+                .filter_map(|i| serde_json::from_value(i).ok())
+                .collect(),
+        ),
+        _ => None,
+    })
 }
 
 /// One sampling iteration of `usage.iterations`. Missing and `null` counts are 0.
@@ -442,12 +449,22 @@ mod tests {
         for usage in [
             r#"{"input_tokens":5,"iterations":{"type":"compaction"}}"#,
             r#"{"input_tokens":5,"iterations":[{"type":"compaction","input_tokens":"many"}]}"#,
+            r#"{"input_tokens":5,"iterations":[7]}"#,
             r#"{"input_tokens":5,"iterations":null}"#,
         ] {
             let body = format!(r#"{{"content":[],"usage":{usage}}}"#);
             let r = parse(Bytes::from(body)).unwrap();
             assert_eq!(r.view.usage.input_tokens, 5, "{usage}");
         }
+    }
+
+    #[test]
+    fn a_bad_iteration_does_not_drop_the_good_ones() {
+        let r = parse(Bytes::from_static(
+            br#"{"content":[],"usage":{"input_tokens":1,"iterations":[{"type":"compaction","input_tokens":"x"},{"type":"compaction","input_tokens":10}]}}"#,
+        ))
+        .unwrap();
+        assert_eq!(r.view.usage.input_tokens, 11);
     }
 
     #[test]
