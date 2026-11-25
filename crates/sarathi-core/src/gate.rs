@@ -80,7 +80,7 @@ impl fmt::Display for PlanError {
         match self {
             Self::Empty => f.write_str("a plan needs at least one criterion"),
             Self::DuplicateId(id) => write!(f, "criterion id `{id}` is used twice"),
-            Self::Blank => f.write_str("a criterion needs a non-empty id and text"),
+            Self::Blank => f.write_str("a criterion needs a non-empty id, text and evidence kind"),
             Self::UnknownKind { id, kind, offered } => write!(
                 f,
                 "criterion `{id}` needs evidence of kind `{kind}`, which this host does not offer (offered: {offered})"
@@ -90,6 +90,39 @@ impl fmt::Display for PlanError {
 }
 
 impl std::error::Error for PlanError {}
+
+/// Why a piece of evidence was not recorded.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum EvidenceError {
+    /// The id is not in the plan.
+    UnknownCriterion(Box<str>),
+    /// The evidence is not of the kind the criterion asked for.
+    WrongKind {
+        /// The criterion.
+        id: Box<str>,
+        /// The kind it asked for.
+        expected: Box<str>,
+        /// The kind that was supplied.
+        got: Box<str>,
+    },
+}
+
+impl fmt::Display for EvidenceError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::UnknownCriterion(id) => write!(f, "`{id}` is not a criterion in the plan"),
+            Self::WrongKind { id, expected, got } => {
+                write!(
+                    f,
+                    "criterion `{id}` needs `{expected}` evidence, not `{got}`"
+                )
+            }
+        }
+    }
+}
+
+impl std::error::Error for EvidenceError {}
 
 /// Why one criterion is not met.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -198,10 +231,10 @@ impl Gate {
             return Err(PlanError::Empty);
         }
         for (i, c) in criteria.iter().enumerate() {
-            if c.id.trim().is_empty() || c.text.trim().is_empty() {
+            if c.id.trim().is_empty() || c.text.trim().is_empty() || c.kind.trim().is_empty() {
                 return Err(PlanError::Blank);
             }
-            if criteria[..i].iter().any(|p| p.id == c.id) {
+            if criteria[..i].iter().any(|p| p.id.trim() == c.id.trim()) {
                 return Err(PlanError::DuplicateId(c.id.clone()));
             }
             if !self.kinds.contains(&c.kind) {
@@ -222,13 +255,30 @@ impl Gate {
         self.edits += 1;
     }
 
-    /// Evidence for criterion `id`, gathered now (after every edit recorded so far).
+    /// Evidence of `kind` for criterion `id`, gathered now (after every edit recorded so far).
     ///
-    /// Returns `false` when `id` is not in the plan (nothing is recorded), so the driver can tell the model.
-    pub fn record_evidence(&mut self, id: &str, summary: impl Into<Box<str>>) -> bool {
+    /// Only a successful host result is evidence: the driver must not call this for a failed or denied tool result.
+    ///
+    /// # Errors
+    ///
+    /// [`EvidenceError`] when `id` is not in the plan or `kind` is not the kind the criterion asked for; nothing is
+    /// recorded, so the driver can tell the model.
+    pub fn record_evidence(
+        &mut self,
+        id: &str,
+        kind: &str,
+        summary: impl Into<Box<str>>,
+    ) -> Result<(), EvidenceError> {
         let Some(c) = self.criteria.iter().find(|c| &*c.id == id) else {
-            return false;
+            return Err(EvidenceError::UnknownCriterion(id.into()));
         };
+        if &*c.kind != kind {
+            return Err(EvidenceError::WrongKind {
+                id: c.id.clone(),
+                expected: c.kind.clone(),
+                got: kind.into(),
+            });
+        }
         self.evidence.insert(
             c.id.clone(),
             Evidence {
@@ -236,7 +286,7 @@ impl Gate {
                 summary: summary.into(),
             },
         );
-        true
+        Ok(())
     }
 
     /// The summary of the evidence held for `id`, fresh or not.
@@ -316,8 +366,14 @@ mod tests {
     fn evidence_after_the_last_edit_passes() {
         let mut g = gate();
         g.record_edit();
-        assert!(g.record_evidence("hero", "render shows the hero"));
-        assert!(g.record_evidence("count", "42 rows both ways"));
+        assert!(
+            g.record_evidence("hero", "look", "render shows the hero")
+                .is_ok()
+        );
+        assert!(
+            g.record_evidence("count", "query", "42 rows both ways")
+                .is_ok()
+        );
         assert!(g.check().is_accepted());
         assert_eq!(g.evidence_for("hero"), Some("render shows the hero"));
     }
@@ -325,8 +381,8 @@ mod tests {
     #[test]
     fn an_edit_after_the_evidence_makes_it_stale() {
         let mut g = gate();
-        g.record_evidence("hero", "ok");
-        g.record_evidence("count", "ok");
+        g.record_evidence("hero", "look", "ok").unwrap();
+        g.record_evidence("count", "query", "ok").unwrap();
         assert!(g.check().is_accepted(), "no edit yet: evidence is fresh");
         g.record_edit();
         let Verdict::Refused(unmet) = g.check() else {
@@ -334,7 +390,7 @@ mod tests {
         };
         assert!(unmet.iter().all(|u| u.gap == Gap::Stale));
         assert!(g.check().to_string().contains("older than your last edit"));
-        g.record_evidence("hero", "ok again");
+        g.record_evidence("hero", "look", "ok again").unwrap();
         let Verdict::Refused(unmet) = g.check() else {
             panic!("expected a refusal")
         };
@@ -345,14 +401,17 @@ mod tests {
     #[test]
     fn evidence_for_an_unknown_criterion_is_not_recorded() {
         let mut g = gate();
-        assert!(!g.record_evidence("nope", "x"));
+        assert_eq!(
+            g.record_evidence("nope", "look", "x"),
+            Err(EvidenceError::UnknownCriterion("nope".into()))
+        );
         assert_eq!(g.evidence_for("nope"), None);
     }
 
     #[test]
     fn plans_are_validated_and_a_bad_plan_keeps_the_old_one() {
         let mut g = gate();
-        g.record_evidence("hero", "ok");
+        g.record_evidence("hero", "look", "ok").unwrap();
         assert_eq!(g.set_plan(vec![]), Err(PlanError::Empty));
         assert_eq!(
             g.set_plan(vec![crit("a", "look"), crit("a", "look")]),
@@ -371,7 +430,7 @@ mod tests {
     #[test]
     fn restating_the_plan_drops_the_evidence() {
         let mut g = gate();
-        g.record_evidence("hero", "ok");
+        g.record_evidence("hero", "look", "ok").unwrap();
         g.set_plan(vec![crit("hero", "look")]).unwrap();
         assert_eq!(g.evidence_for("hero"), None);
         assert!(!g.check().is_accepted());
@@ -381,5 +440,60 @@ mod tests {
     fn duplicate_kinds_are_dropped() {
         let k = EvidenceKinds::new(["look", "look", "query"]);
         assert_eq!(k.iter().collect::<Vec<_>>(), ["look", "query"]);
+    }
+
+    #[test]
+    fn evidence_of_the_wrong_kind_is_refused_and_not_recorded() {
+        let mut g = gate();
+        let err = g
+            .record_evidence("hero", "query", "rows match")
+            .unwrap_err();
+        assert_eq!(
+            err,
+            EvidenceError::WrongKind {
+                id: "hero".into(),
+                expected: "look".into(),
+                got: "query".into()
+            }
+        );
+        assert!(err.to_string().contains("needs `look` evidence"));
+        assert_eq!(g.evidence_for("hero"), None);
+    }
+
+    #[test]
+    fn evidence_edit_evidence_for_one_criterion_ends_fresh() {
+        let mut g = gate();
+        g.record_evidence("hero", "look", "first").unwrap();
+        g.record_edit();
+        g.record_evidence("hero", "look", "second").unwrap();
+        g.record_evidence("count", "query", "fresh").unwrap();
+        assert!(g.check().is_accepted());
+        assert_eq!(g.evidence_for("hero"), Some("second"));
+    }
+
+    #[test]
+    fn ids_that_differ_only_by_whitespace_are_duplicates_and_a_blank_kind_is_refused() {
+        let mut g = Gate::new(EvidenceKinds::new(["look"]));
+        assert_eq!(
+            g.set_plan(vec![crit("a", "look"), crit("a ", "look")]),
+            Err(PlanError::DuplicateId("a ".into()))
+        );
+        assert_eq!(g.set_plan(vec![crit("a", " ")]), Err(PlanError::Blank));
+    }
+
+    /// The scripted run the slice asks for: finishing without post-edit evidence is refused, and supplying it passes.
+    #[test]
+    fn a_scripted_run_is_refused_until_it_has_evidence_after_its_last_edit() {
+        let mut g = Gate::new(EvidenceKinds::new(["look"]));
+        assert_eq!(g.check(), Verdict::NoPlan);
+        g.set_plan(vec![crit("hero", "look")]).unwrap();
+        g.record_edit();
+        assert!(!g.check().is_accepted(), "tries to finish after an edit");
+        g.record_evidence("hero", "look", "render ok").unwrap();
+        g.record_edit();
+        assert!(!g.check().is_accepted(), "edited again after the look");
+        g.record_evidence("hero", "look", "render ok again")
+            .unwrap();
+        assert!(g.check().is_accepted());
     }
 }
