@@ -1053,6 +1053,20 @@ name = "sarathi"
 version = "0.0.0"
 
 [[package]]
+name = "sarathi-context"
+version = "0.0.0"
+dependencies = [
+ "sarathi-log",
+ "sarathi-protocol",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "thiserror",
+ "tokio",
+]
+
+[[package]]
 name = "sarathi-core"
 version = "0.0.0"
 dependencies = [
