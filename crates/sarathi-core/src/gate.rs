@@ -55,16 +55,22 @@ pub struct Criterion {
 }
 
 /// Why a plan was not accepted.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 #[non_exhaustive]
 pub enum PlanError {
     /// The plan has no criteria.
+    #[error("a plan needs at least one criterion")]
     Empty,
     /// Two criteria share an id.
+    #[error("criterion id `{0}` is used twice")]
     DuplicateId(Box<str>),
     /// A criterion has an empty id or text.
+    #[error("a criterion needs a non-empty id, text and evidence kind")]
     Blank,
     /// A criterion names an evidence kind the host does not offer.
+    #[error(
+        "criterion `{id}` needs evidence of kind `{kind}`, which this host does not offer (offered: {offered})"
+    )]
     UnknownKind {
         /// The criterion.
         id: Box<str>,
@@ -75,29 +81,15 @@ pub enum PlanError {
     },
 }
 
-impl fmt::Display for PlanError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Empty => f.write_str("a plan needs at least one criterion"),
-            Self::DuplicateId(id) => write!(f, "criterion id `{id}` is used twice"),
-            Self::Blank => f.write_str("a criterion needs a non-empty id, text and evidence kind"),
-            Self::UnknownKind { id, kind, offered } => write!(
-                f,
-                "criterion `{id}` needs evidence of kind `{kind}`, which this host does not offer (offered: {offered})"
-            ),
-        }
-    }
-}
-
-impl std::error::Error for PlanError {}
-
 /// Why a piece of evidence was not recorded.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 #[non_exhaustive]
 pub enum EvidenceError {
     /// The id is not in the plan.
+    #[error("`{0}` is not a criterion in the plan")]
     UnknownCriterion(Box<str>),
     /// The evidence is not of the kind the criterion asked for.
+    #[error("criterion `{id}` needs `{expected}` evidence, not `{got}`")]
     WrongKind {
         /// The criterion.
         id: Box<str>,
@@ -107,22 +99,6 @@ pub enum EvidenceError {
         got: Box<str>,
     },
 }
-
-impl fmt::Display for EvidenceError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::UnknownCriterion(id) => write!(f, "`{id}` is not a criterion in the plan"),
-            Self::WrongKind { id, expected, got } => {
-                write!(
-                    f,
-                    "criterion `{id}` needs `{expected}` evidence, not `{got}`"
-                )
-            }
-        }
-    }
-}
-
-impl std::error::Error for EvidenceError {}
 
 /// Why one criterion is not met.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -245,7 +221,13 @@ impl Gate {
                 });
             }
         }
-        self.criteria = criteria;
+        self.criteria = criteria
+            .into_iter()
+            .map(|mut c| {
+                c.id = c.id.trim().into();
+                c
+            })
+            .collect();
         self.evidence.clear();
         Ok(())
     }
@@ -269,7 +251,7 @@ impl Gate {
         kind: &str,
         summary: impl Into<Box<str>>,
     ) -> Result<(), EvidenceError> {
-        let Some(c) = self.criteria.iter().find(|c| &*c.id == id) else {
+        let Some(c) = self.criteria.iter().find(|c| &*c.id == id.trim()) else {
             return Err(EvidenceError::UnknownCriterion(id.into()));
         };
         if &*c.kind != kind {
@@ -343,6 +325,15 @@ mod tests {
         g.set_plan(vec![crit("hero", "look"), crit("count", "query")])
             .unwrap();
         g
+    }
+
+    #[test]
+    fn a_plan_id_with_surrounding_whitespace_is_stored_trimmed() {
+        let mut g = Gate::new(EvidenceKinds::new(["look"]));
+        g.set_plan(vec![crit("a ", "look")]).unwrap();
+        g.record_evidence("a", "look", "seen").unwrap();
+        g.record_evidence(" a ", "look", "seen again").unwrap();
+        assert!(g.check().is_accepted());
     }
 
     #[test]
