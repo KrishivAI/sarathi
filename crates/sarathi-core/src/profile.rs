@@ -28,11 +28,16 @@ pub enum StepProtocol {
 pub struct ModelProfile {
     /// How a step is read.
     pub protocol: StepProtocol,
-    /// The provider takes a JSON schema for the answer ([`step_schema`]); read by the driver for
-    /// [`StepProtocol::JsonObject`].
+    /// The provider takes a JSON schema for the answer ([`step_schema`]), for [`StepProtocol::JsonObject`].
+    ///
+    /// A record for the host: neither the core nor the driver reads it. The request's parameters are the caller's
+    /// (fixed per session, so they are part of the logged recipe), and the host puts the schema there when it builds
+    /// the caller, e.g. `openai::step_format` through `OpenAiCaller::with_extra` (feature `openai`).
     pub structured_output: bool,
-    /// The model may ask for several tool calls in one step. The core runs them in order, one at a time, either way;
-    /// the driver reads this to set the request's parallel-tool parameter.
+    /// The model may ask for several tool calls in one step. The core runs them in order, one at a time, either way.
+    ///
+    /// A record for the host, like `structured_output`: a provider's parallel-tool parameter (`parallel_tool_calls`,
+    /// `tool_choice.disable_parallel_tool_use`) goes in the caller's parameters, set by the host.
     pub parallel_tools: bool,
 }
 
