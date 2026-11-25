@@ -1,0 +1,1 @@
+{"id":"msg_01","type":"message","role":"assistant","model":"claude-opus-5-5","content":[{"type":"thinking","thinking":"Fine.","signature":"sigM"},{"type":"text","text":"Yes."}],"stop_reason":"end_turn","stop_sequence":null,"usage":{"input_tokens":12,"output_tokens":34}}

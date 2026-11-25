@@ -1,0 +1,1 @@
+[{"type":"thinking","thinking":"Plan: é step.","signature":"EqQBsig"},{"type":"text","text":"Hi there"},{"type":"tool_use","id":"toolu_01","name":"edit","input":{"path":"a\u00e9.rs","n":1e5}}]

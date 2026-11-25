@@ -1,0 +1,145 @@
+{
+  "description": "Each case: a target, a status, headers and a body from the server, and the parsed result (id, model, content, finish_reason, usage) or the error every client must raise. A missing id or model is the empty string. An error without message: only kind, retryable and status are compared.",
+  "key": "sk-fixture-key-0001",
+  "cases": [
+    {
+      "name": "openai answer",
+      "op": "chat",
+      "target": {
+        "kind": "gateway",
+        "base_url": "{base}"
+      },
+      "status": 200,
+      "headers": {
+        "content-type": "application/json"
+      },
+      "body": "{\"id\":\"c1\",\"model\":\"gpt-4o\",\"choices\":[{\"message\":{\"role\":\"assistant\",\"content\":\"hello\"},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":3,\"completion_tokens\":2}}",
+      "expect": {
+        "ok": {
+          "content": "hello",
+          "finish_reason": "stop",
+          "id": "c1",
+          "model": "gpt-4o",
+          "usage": {
+            "input_tokens": 3,
+            "output_tokens": 2
+          }
+        }
+      }
+    },
+    {
+      "name": "openai answer cut by length without usage",
+      "op": "chat",
+      "target": {
+        "kind": "openai",
+        "base_url": "{base}"
+      },
+      "status": 200,
+      "headers": {
+        "content-type": "application/json"
+      },
+      "body": "{\"id\":\"c2\",\"model\":\"gpt-4o\",\"choices\":[{\"message\":{\"role\":\"assistant\",\"content\":\"par\"},\"finish_reason\":\"length\"}]}",
+      "expect": {
+        "ok": {
+          "content": "par",
+          "finish_reason": "length",
+          "id": "c2",
+          "model": "gpt-4o",
+          "usage": null
+        }
+      }
+    },
+    {
+      "name": "anthropic answer joins text blocks",
+      "op": "chat",
+      "target": {
+        "kind": "anthropic",
+        "base_url": "{base}"
+      },
+      "status": 200,
+      "headers": {
+        "content-type": "application/json"
+      },
+      "body": "{\"id\":\"m1\",\"model\":\"claude-sonnet-5\",\"content\":[{\"type\":\"text\",\"text\":\"hel\"},{\"type\":\"text\",\"text\":\"lo\"}],\"stop_reason\":\"end_turn\",\"usage\":{\"input_tokens\":3,\"output_tokens\":2}}",
+      "expect": {
+        "ok": {
+          "content": "hello",
+          "finish_reason": "stop",
+          "id": "m1",
+          "model": "claude-sonnet-5",
+          "usage": {
+            "input_tokens": 3,
+            "output_tokens": 2
+          }
+        }
+      }
+    },
+    {
+      "name": "anthropic max_tokens is length",
+      "op": "chat",
+      "target": {
+        "kind": "anthropic",
+        "base_url": "{base}"
+      },
+      "status": 200,
+      "headers": {
+        "content-type": "application/json"
+      },
+      "body": "{\"id\":\"m1\",\"model\":\"claude-sonnet-5\",\"content\":[{\"type\":\"text\",\"text\":\"hel\"},{\"type\":\"text\",\"text\":\"lo\"}],\"stop_reason\":\"max_tokens\",\"usage\":{\"input_tokens\":3,\"output_tokens\":2}}",
+      "expect": {
+        "ok": {
+          "content": "hello",
+          "finish_reason": "length",
+          "id": "m1",
+          "model": "claude-sonnet-5",
+          "usage": {
+            "input_tokens": 3,
+            "output_tokens": 2
+          }
+        }
+      }
+    },
+    {
+      "name": "a 200 that is not JSON is malformed",
+      "op": "chat",
+      "target": {
+        "kind": "openai",
+        "base_url": "{base}"
+      },
+      "status": 200,
+      "headers": {
+        "content-type": "text/html"
+      },
+      "body": "<html>welcome</html>",
+      "expect": {
+        "error": {
+          "kind": "malformed",
+          "retryable": false,
+          "status": null,
+          "retry_after": null
+        }
+      }
+    },
+    {
+      "name": "a 200 with no choices is malformed",
+      "op": "chat",
+      "target": {
+        "kind": "openai",
+        "base_url": "{base}"
+      },
+      "status": 200,
+      "headers": {
+        "content-type": "application/json"
+      },
+      "body": "{\"id\":\"c3\",\"model\":\"gpt-4o\",\"choices\":[]}",
+      "expect": {
+        "error": {
+          "kind": "malformed",
+          "retryable": false,
+          "status": null,
+          "retry_after": null
+        }
+      }
+    }
+  ]
+}

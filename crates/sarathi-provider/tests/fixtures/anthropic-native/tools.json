@@ -1,0 +1,1 @@
+[{"name":"edit","description":"Edit a file","input_schema":{"type":"object","properties":{"path":{"type":"string"},"n":{"type":"number","maximum":1e5}},"required":["path"]}},{"name":"read","input_schema":{"type":"object","properties":{"path":{"type":"string"}}}}]
