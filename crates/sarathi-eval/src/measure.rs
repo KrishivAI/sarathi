@@ -4,7 +4,8 @@
 //!
 //! The judging rule ([`Judging`]: which harness is old and which new, the strong slot, the cost tolerance) is an input
 //! stated before the run; the accept tolerance of each pair is the old arm's own spread
-//! ([`Tolerance::from_old_spread`]). A slot that stopped at its cap reaches the kill line as
+//! ([`Tolerance::from_old_spread`]), the cost tolerance either the old arm's own cost spread or a fixed fraction
+//! ([`CostTolerance`]). A slot that stopped at its cap reaches the kill line as
 //! [`ArmPair::stopped`] and the report as [`Report::stopped`]; a slot with no run on either harness (stopped before
 //! its first group) is left out of the kill line with a note, since there is nothing to judge.
 
@@ -22,8 +23,18 @@ pub struct Judging<'a> {
     pub new: &'a str,
     /// The slot the kill line is decided on (a name in [`RunConfig::slots`]).
     pub strong_slot: &'a str,
-    /// How far above the old cost per accepted run the new one may rise, as a fraction (0.05 is 5%).
-    pub cost_fraction: f64,
+    /// How far above the old cost per accepted run the new one may rise.
+    pub cost: CostTolerance,
+}
+
+/// The cost side of the kill line's tolerance, chosen before the run.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum CostTolerance {
+    /// The old arm's own run-to-run cost spread ([`ArmStats::cost_spread`]), per arm: the same rule as the accept
+    /// tolerance ([`Tolerance::from_old_spreads`]).
+    OldSpread,
+    /// A fixed fraction for every arm (0.05 is 5%; 0 is strict: not higher at all).
+    Fraction(f64),
 }
 
 /// A report that cannot be built.
@@ -89,7 +100,10 @@ pub fn report(
                 strong: s.slot == j.strong_slot,
                 old,
                 new,
-                tolerance: Tolerance::from_old_spread(old, j.cost_fraction),
+                tolerance: match j.cost {
+                    CostTolerance::OldSpread => Tolerance::from_old_spreads(old),
+                    CostTolerance::Fraction(f) => Tolerance::from_old_spread(old, f),
+                },
                 stopped: run.slot_stopped(&s.slot),
             });
         }
@@ -131,10 +145,11 @@ fn check(config: &RunConfig, j: &Judging<'_>) -> Result<(), MeasureError> {
     if config.slot(j.strong_slot).is_none() {
         return bad(format!("strong slot `{}` is not configured", j.strong_slot));
     }
-    if !j.cost_fraction.is_finite() || j.cost_fraction < 0.0 {
+    if let CostTolerance::Fraction(f) = j.cost
+        && (!f.is_finite() || f < 0.0)
+    {
         return bad(format!(
-            "cost tolerance {} is not a fraction of at least 0",
-            j.cost_fraction
+            "cost tolerance {f} is not a fraction of at least 0"
         ));
     }
     Ok(())

@@ -5,7 +5,7 @@
 use sarathi_eval::brief::{Brief, Split};
 use sarathi_eval::config::{RunConfig, run_within_caps};
 use sarathi_eval::killline::Outcome;
-use sarathi_eval::measure::{Judging, MeasureError, report};
+use sarathi_eval::measure::{CostTolerance, Judging, MeasureError, report};
 use sarathi_eval::metrics::{Purpose, TokenUsage};
 use sarathi_eval::report::{to_json, to_markdown};
 use sarathi_eval::runner::{Acceptance, Arm, Harness, HarnessError, HarnessOutput};
@@ -16,7 +16,7 @@ const JUDGING: Judging<'static> = Judging {
     old: "old",
     new: "new",
     strong_slot: "strong",
-    cost_fraction: 0.05,
+    cost: CostTolerance::Fraction(0.05),
 };
 
 /// Every run spends one million uncached input tokens ($2 on `strong`). It produces `no` for the brief numbers in
@@ -119,6 +119,77 @@ fn a_full_run_reports_every_arm_and_judges_every_slot() {
     // The same run gives the same report.
     let again = report(&c, &run, Some(&JUDGING), "2026-11-28", 0).unwrap();
     assert_eq!(to_json(&r).unwrap(), to_json(&again).unwrap());
+}
+
+/// Every run is accepted; repetition `r` spends `costs[r]` million uncached input tokens.
+struct CostBy {
+    costs: [u64; 3],
+}
+impl Harness for CostBy {
+    fn run(&self, _b: &Brief, _m: &str, run: u32) -> Result<HarnessOutput, HarnessError> {
+        Ok(HarnessOutput {
+            artifact: "ok".into(),
+            usage: TokenUsage {
+                input_tokens: self.costs[run as usize % 3] * 1_000_000,
+                ..TokenUsage::default()
+            },
+            ..HarnessOutput::default()
+        })
+    }
+}
+
+#[test]
+fn the_old_cost_spread_is_the_cost_tolerance_when_chosen() {
+    let c = RunConfig::from_json(A9).unwrap();
+    let judging = Judging {
+        cost: CostTolerance::OldSpread,
+        ..JUDGING
+    };
+    // Old: 1, 2, 3 million a run (mean 2, std sqrt(2/3)): a spread of about 40.8%.
+    let old = CostBy { costs: [1, 2, 3] };
+    let spread = (2.0f64 / 3.0).sqrt() / 2.0;
+    let bs = briefs(2);
+    // New: a third dearer than the old mean, within the spread: passes; a fixed 5% fails it.
+    let within = CostBy { costs: [3, 2, 3] };
+    let run = run_within_caps(
+        &c,
+        &bs,
+        &arms(&c, &old, &within),
+        &Ok_,
+        Purpose::Measure,
+        &[],
+    )
+    .unwrap();
+    let r = report(&c, &run, Some(&judging), "2026-11-28", 0).unwrap();
+    let k = r.kill_line.as_ref().unwrap();
+    assert_eq!(k.outcome, Outcome::Pass, "{:?}", k.notes);
+    assert!((r.arms[0].cost_spread - spread).abs() < 1e-9);
+    assert!((k.arms[0].tolerance.cost_fraction - spread).abs() < 1e-9);
+    let fixed = report(&c, &run, Some(&JUDGING), "2026-11-28", 0).unwrap();
+    assert_eq!(fixed.kill_line.unwrap().outcome, Outcome::Fail);
+    // New: 50% dearer, beyond the spread: fails on cost.
+    let beyond = CostBy { costs: [3, 3, 3] };
+    let run = run_within_caps(
+        &c,
+        &bs,
+        &arms(&c, &old, &beyond),
+        &Ok_,
+        Purpose::Measure,
+        &[],
+    )
+    .unwrap();
+    let k = report(&c, &run, Some(&judging), "2026-11-28", 0)
+        .unwrap()
+        .kill_line
+        .unwrap();
+    assert_eq!(k.outcome, Outcome::Fail);
+    assert!(
+        k.notes
+            .iter()
+            .any(|n| n.contains("strong arm `strong`: cost per accepted run")),
+        "{:?}",
+        k.notes
+    );
 }
 
 #[test]
@@ -262,14 +333,14 @@ fn a_judging_rule_that_does_not_fit_is_refused() {
         (
             "negative cost",
             Judging {
-                cost_fraction: -0.1,
+                cost: CostTolerance::Fraction(-0.1),
                 ..JUDGING
             },
         ),
         (
             "NaN cost",
             Judging {
-                cost_fraction: f64::NAN,
+                cost: CostTolerance::Fraction(f64::NAN),
                 ..JUDGING
             },
         ),

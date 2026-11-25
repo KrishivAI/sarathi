@@ -25,6 +25,16 @@ impl Tolerance {
             cost_fraction,
         }
     }
+
+    /// Both tolerances from the old arm's own run-to-run spread: accept rate ([`ArmStats::spread`]) and cost per
+    /// accepted run ([`ArmStats::cost_spread`]), so neither number is picked by hand.
+    #[must_use]
+    pub fn from_old_spreads(old: &ArmStats) -> Self {
+        Self {
+            accept: old.spread,
+            cost_fraction: old.cost_spread,
+        }
+    }
 }
 
 /// One model arm measured under both harnesses.
@@ -202,6 +212,7 @@ mod tests {
             valid_ops_rate: 1.0,
             cost_micro: 0,
             cost_per_accepted_micro: cost,
+            cost_spread: 0.0,
             steps_mean: 0.0,
             wall_p50_ms: 0,
             wall_p95_ms: 0,
