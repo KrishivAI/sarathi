@@ -72,6 +72,11 @@ version = "0.0.0"
 [[package]]
 name = "sarathi-tools"
 version = "0.0.0"
+dependencies = [
+ "sarathi-protocol",
+ "serde_json",
+ "thiserror",
+]
 
 [[package]]
 name = "serde"
