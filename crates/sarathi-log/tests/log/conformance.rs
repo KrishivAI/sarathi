@@ -425,6 +425,73 @@ async fn tool_entries_name_a_call_that_was_asked_for<S: LogStore>(store: &S) {
     .await;
 }
 
+async fn nothing_moves_past_an_open_tool_round<S: LogStore>(store: &S) {
+    let mut s = new_session(store).await;
+    let mut v = vec![s.prefix(), s.user("one"), s.request()];
+    v.extend(s.respond(
+        r#"[{"type":"tool_use","id":"toolu_01","name":"look","input":{}}]"#,
+        &[("toolu_01", "look")],
+    ));
+    v.push(s.start("toolu_01", "look", Effect::Read));
+    append(store, &s, v).await;
+    // A user message that starts a turn, or a request, would send a `tool_use` with no result.
+    refused(
+        store,
+        &s,
+        Body::UserMessage {
+            content: raw(r#""two""#),
+            steer: false,
+        },
+    )
+    .await;
+    let recipe = s.log.next_recipe(raw("{}")).unwrap();
+    refused(
+        store,
+        &s,
+        Body::ModelRequest {
+            recipe,
+            sha256: "0".repeat(64),
+            compaction: None,
+        },
+    )
+    .await;
+    // A steer is fine, and a started read may start again (after a restart).
+    let v = vec![
+        s.push(Body::UserMessage {
+            content: raw(r#""also""#),
+            steer: true,
+        }),
+        s.start("toolu_01", "look", Effect::Read),
+        s.result("toolu_01", "seen"),
+    ];
+    append(store, &s, v).await;
+    // Once answered, the call neither starts nor is answered again.
+    refused(
+        store,
+        &s,
+        Body::ToolStart {
+            call: "toolu_01".into(),
+            tool: "look".into(),
+            effect: Effect::Read,
+        },
+    )
+    .await;
+    let block = raw(r#"{"type":"tool_result","tool_use_id":"toolu_01","content":"again"}"#);
+    refused(
+        store,
+        &s,
+        Body::ToolResult {
+            call: "toolu_01".into(),
+            block,
+            is_error: false,
+            spill: None,
+        },
+    )
+    .await;
+    let r = s.request();
+    append(store, &s, vec![r]).await;
+}
+
 async fn entry_fields_are_checked<S: LogStore>(store: &S) {
     let mut s = new_session(store).await;
     let v = vec![s.prefix(), s.user("one")];
@@ -500,6 +567,7 @@ conformance!(
     a_turn_ends_only_once_its_calls_are_answered,
     tool_entries_name_a_call_that_was_asked_for,
     entry_fields_are_checked,
+    nothing_moves_past_an_open_tool_round,
 );
 
 #[tokio::test(flavor = "multi_thread")]

@@ -77,7 +77,8 @@ impl JsonlStore {
 
     /// Gives up a session this store opened for writing: its lock, file and in-memory copy. An append in progress
     /// keeps them until it returns. The next `load` or `append` opens the session again. Returns whether the store
-    /// held it.
+    /// held it. Until that append returns, opening the session again (here or in another store) gives
+    /// [`LogError::Locked`].
     pub fn release(&self, session: SessionId) -> bool {
         self.inner.writers().remove(&session).is_some()
     }

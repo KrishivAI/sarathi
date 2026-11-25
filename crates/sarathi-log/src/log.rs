@@ -285,6 +285,7 @@ impl Log {
                 sha256,
                 compaction,
             } => {
+                self.all_answered().map_err(invalid)?;
                 if *compaction == Some(Strategy::Deterministic) {
                     return Err(invalid("a deterministic seed makes no model call".into()));
                 }
@@ -309,28 +310,69 @@ impl Log {
                 }
             }
             Body::ToolStart { call, .. } | Body::ToolResult { call, .. } => {
-                if !self
-                    .asked()
-                    .is_some_and(|(_, asked)| asked.iter().any(|c| *c.id == **call))
-                {
+                let Some((at, asked)) = self.asked() else {
+                    return Err(invalid(format!(
+                        "no open assistant message asked for call `{call}`"
+                    )));
+                };
+                if !asked.iter().any(|c| *c.id == **call) {
                     return Err(invalid(format!(
                         "no open assistant message asked for call `{call}`"
                     )));
                 }
-            }
-            Body::TurnEnd { .. } => {
-                if let Some((at, asked)) = self.asked()
-                    && let Some(open) = asked.iter().find(|c| !self.answered_after(at, &c.id))
-                {
+                // A started read may start again after a restart; nothing starts or answers a call again once it
+                // has its result.
+                if self.answered_after(at, call) {
                     return Err(invalid(format!(
-                        "call `{}` has no tool.result: answer it before the turn ends",
-                        open.id
+                        "call `{call}` already has its tool.result"
                     )));
                 }
             }
+            // Each of these moves past the tool round: the next request would carry a `tool_use` with no result.
+            Body::TurnEnd { .. } | Body::UserMessage { steer: false, .. } => {
+                self.all_answered().map_err(invalid)?;
+            }
             _ => {}
         }
+        self.check_fork_copy(e)
+    }
+
+    /// Every call of the open turn's last assistant message has its `tool.result`.
+    fn all_answered(&self) -> Result<(), String> {
+        if let Some((at, asked)) = self.asked()
+            && let Some(open) = asked.iter().find(|c| !self.answered_after(at, &c.id))
+        {
+            return Err(format!(
+                "call `{}` has no tool.result: answer it first",
+                open.id
+            ));
+        }
         Ok(())
+    }
+
+    /// In a forked session, the entry after the copy of the parent's lines is the fork's `segment.start`, and it is
+    /// accepted only if the copy hashes to the header's digest. So a log a store accepted never fails
+    /// [`Log::verify_fork`], and a fork cut short (or repaired) before its `segment.start` stays a readable prefix.
+    fn check_fork_copy(&self, e: &Entry) -> Result<(), LogError> {
+        let Some(from) = &self.header.forked_from else {
+            return Ok(());
+        };
+        if e.seq.0 != from.seq.0 + 1 {
+            return Ok(());
+        }
+        if !matches!(
+            e.body,
+            Body::SegmentStart {
+                reason: SegmentReason::Fork,
+                ..
+            }
+        ) {
+            return Err(LogError::Invalid {
+                seq: e.seq,
+                detail: "the entry after a fork's copy must be its segment.start".into(),
+            });
+        }
+        self.verify_fork()
     }
 
     /// The last assistant message of the open turn and the calls it asked for: found walking back to the nearest
@@ -614,6 +656,7 @@ impl Log {
         if usize::try_from(from.seq.0).map_or(true, |n| n > self.entries.len()) {
             return Ok(());
         }
+        // Called from `check` before the `segment.start` is pushed, and on a whole log.
         let actual = self.lines_sha256(from.seq)?;
         if actual == from.sha256 {
             Ok(())
@@ -631,9 +674,13 @@ impl Log {
     /// # Errors
     /// [`LogError::Invalid`] if `at` is past the end.
     pub fn lines_sha256(&self, at: Seq) -> Result<sarathi_protocol::Sha256, LogError> {
-        let part = self.up_to(at)?;
+        let n = usize::try_from(at.0).unwrap_or(usize::MAX);
+        let part = self.entries.get(..n).ok_or_else(|| LogError::Invalid {
+            seq: at,
+            detail: "past the end of the log".into(),
+        })?;
         let mut h = Sha256::new();
-        for e in &part.entries {
+        for e in part {
             h.update(encode_entry(e)?.as_bytes());
             h.update(b"\n");
         }

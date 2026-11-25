@@ -309,3 +309,52 @@ async fn a_crash_inside_a_batch_leaves_whole_entries_that_read_as_a_valid_log() 
         std::fs::write(&path, &full).unwrap();
     }
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_fork_cut_short_stays_readable_and_cannot_be_finished_over_a_changed_copy() {
+    let root = tempfile::tempdir().unwrap();
+    let (id, _) = written(root.path()).await;
+    let store = JsonlStore::new(root.path());
+    let child = sarathi_log::fork(&store, id, Seq(11), 7).await.unwrap();
+    let start = store.load(child).await.unwrap().log.entries()[11].clone();
+    drop(store);
+    let path = JsonlStore::new(root.path()).log_path(child);
+    let full = std::fs::read_to_string(&path).unwrap();
+    // Cut inside the copy's last line (seq 11): the writer cuts the tear and records it as seq 11.
+    let keep: String = full.lines().take(11).map(|l| format!("{l}\n")).collect();
+    let torn = format!("{keep}{}", &full.lines().nth(11).unwrap()[..20]);
+    std::fs::write(&path, &torn).unwrap();
+    let writer = JsonlStore::new(root.path());
+    let repaired = writer.load(child).await.unwrap();
+    assert!(repaired.recovered.unwrap().repaired);
+    assert!(matches!(repaired.log.entries()[10].body, Body::Note { .. }));
+    // It reads again, and again.
+    assert_eq!(writer.load(child).await.unwrap().log, repaired.log);
+    drop(writer);
+    assert_eq!(
+        JsonlStore::new(root.path()).read(child).await.unwrap().log,
+        repaired.log
+    );
+    // Finishing the fork over the changed copy is refused; so is anything else after the copy.
+    let writer = JsonlStore::new(root.path());
+    let r = writer
+        .append(child, Seq(12), vec![start], Durability::Durable)
+        .await;
+    assert!(
+        matches!(r, Err(LogError::ForkMismatch { at: Seq(11), .. })),
+        "{r:?}"
+    );
+    let note = sarathi_log::Entry {
+        seq: Seq(12),
+        seg: sarathi_log::SegmentId(0),
+        ts: 1,
+        body: Body::Note { data: raw("{}") },
+    };
+    let r = writer
+        .append(child, Seq(12), vec![note], Durability::Durable)
+        .await;
+    assert!(
+        matches!(r, Err(LogError::Invalid { seq: Seq(12), .. })),
+        "{r:?}"
+    );
+}

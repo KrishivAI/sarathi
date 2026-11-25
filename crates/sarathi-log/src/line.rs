@@ -531,12 +531,14 @@ pub fn read_log(bytes: &[u8]) -> Result<ReadLog, LogError> {
         let n = i as u64 + 1;
         let e = decode_entry(&text(n, raw)?).map_err(|e| e.into_log_error(n))?;
         let seq = e.seq;
-        log.append(seq, vec![e]).map_err(|err| LogError::Corrupt {
-            line: n,
-            detail: err.to_string(),
+        log.append(seq, vec![e]).map_err(|err| match err {
+            LogError::ForkMismatch { .. } => err,
+            _ => LogError::Corrupt {
+                line: n,
+                detail: err.to_string(),
+            },
         })?;
     }
-    log.verify_fork()?;
     Ok(ReadLog {
         log,
         complete_len: good_len as u64,

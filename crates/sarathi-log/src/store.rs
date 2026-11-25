@@ -55,7 +55,9 @@ pub trait LogStore: Send + Sync {
 
     /// Appends `entries` if the session's next seq is `expected`; all or none. Returns the next seq after them.
     ///
-    /// "All or none" holds for a refused batch and within the process. A crash during a file store's append can
+    /// "All or none" holds for a refused batch and within the process, with one exception: if a file write fails
+    /// and cutting its partial bytes off fails too, the store stops appending to that session; the next open reads
+    /// the partial bytes as whole entries plus a torn tail. A crash during a file store's append can
     /// leave a prefix of the batch, in whole entries, which reads as a valid log: a writer orders a batch so every
     /// prefix of it is a state it can resume from (a compaction's seeds before the `segment.start` naming them, a
     /// fork's copied entries before its `segment.start`).
