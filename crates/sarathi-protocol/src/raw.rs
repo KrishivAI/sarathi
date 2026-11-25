@@ -20,6 +20,7 @@ use serde_json::value::RawValue;
 pub struct RawJson(Box<RawValue>);
 
 /// A value that is not one JSON value.
+#[non_exhaustive]
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum RawJsonError {
     /// The bytes are not UTF-8.
