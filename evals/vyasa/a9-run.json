@@ -1,0 +1,30 @@
+{
+  "version": 1,
+  "runs": 3,
+  "harnesses": ["old", "new"],
+  "slots": [
+    {
+      "slot": "strong",
+      "model": "claude-sonnet-5-5",
+      "native_tools": true,
+      "cap_usd": 170,
+      "price": { "input": 2000000, "output": 10000000, "cached_input": 100000, "cache_write": 2500000 }
+    },
+    {
+      "slot": "cheap-tools",
+      "model": "gpt-5-mini",
+      "native_tools": true,
+      "cap_usd": 20,
+      "price": { "input": 250000, "output": 2000000, "cached_input": 250000 }
+    },
+    {
+      "slot": "fallback-no-tools",
+      "model": "gemini-2.5-flash",
+      "native_tools": false,
+      "cap_usd": 20,
+      "price": { "input": 300000, "output": 2500000, "cached_input": 300000 }
+    }
+  ],
+  "total_cap_usd": 210,
+  "prices_checked": "claude-sonnet-5-5: Anthropic's published rates (input $2, output $10, cache read $0.10, 5-minute cache write $2.50 per million tokens). gpt-5-mini and gemini-2.5-flash: input and output from the Vyasa model registry; their cache reads are priced at the input rate until checked, which can only overstate cost. Check all three against the providers' price pages on the run day and record the result here."
+}

@@ -15,6 +15,10 @@ pub struct TokenUsage {
     pub output_tokens: u64,
     /// Input tokens read from the prompt cache.
     pub cached_input_tokens: u64,
+    /// Input tokens written to the prompt cache (billed above the uncached rate by providers that charge for writes).
+    /// Absent in records written before it was counted: read as 0.
+    #[serde(default)]
+    pub cache_write_input_tokens: u64,
 }
 
 /// The run-record format version this crate writes. It reads this version and the one before.
@@ -84,6 +88,10 @@ pub struct Price {
     pub output: u64,
     /// Cache read.
     pub cached_input: u64,
+    /// Cache write. `None` (a table written before it was priced, or a provider that does not charge for writes)
+    /// prices a written token as uncached input, so a write is never cheaper than sending the token uncached.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_write: Option<u64>,
 }
 
 /// One price table for both arms (the metrics table). A model missing from it is an error, never a free run.
@@ -119,7 +127,8 @@ impl PriceTable {
         let u = run.usage;
         let total = u128::from(u.input_tokens) * u128::from(p.input)
             + u128::from(u.output_tokens) * u128::from(p.output)
-            + u128::from(u.cached_input_tokens) * u128::from(p.cached_input);
+            + u128::from(u.cached_input_tokens) * u128::from(p.cached_input)
+            + u128::from(u.cache_write_input_tokens) * u128::from(p.cache_write.unwrap_or(p.input));
         Ok(u64::try_from(total / 1_000_000).unwrap_or(u64::MAX))
     }
 }
@@ -299,6 +308,7 @@ mod tests {
                 input_tokens: 1_000_000,
                 output_tokens: 500_000,
                 cached_input_tokens: 1_000_000,
+                cache_write_input_tokens: 0,
             },
             steps: 4,
             wall_ms: 1000 * u64::from(n + 1),
@@ -314,6 +324,7 @@ mod tests {
                 input: 3_000_000,
                 output: 15_000_000,
                 cached_input: 300_000,
+                cache_write: None,
             },
         );
         PriceTable { models }
@@ -323,6 +334,32 @@ mod tests {
     fn cost_is_exact_integer_micro_dollars() {
         // 1M in at $3 + 0.5M out at $15 + 1M cached at $0.30 = $10.80.
         assert_eq!(prices().cost_micro(&run("b", "a", 0, true)), Ok(10_800_000));
+    }
+
+    #[test]
+    fn cache_writes_cost_their_price_or_the_input_price() {
+        let mut r = run("b", "a", 0, true);
+        r.usage = TokenUsage {
+            cache_write_input_tokens: 1_000_000,
+            ..TokenUsage::default()
+        };
+        // No write price: a written token costs what an uncached one does ($3).
+        assert_eq!(prices().cost_micro(&r), Ok(3_000_000));
+        let mut t = prices();
+        if let Some(p) = t.models.get_mut("m") {
+            p.cache_write = Some(3_750_000);
+        }
+        assert_eq!(t.cost_micro(&r), Ok(3_750_000));
+    }
+
+    #[test]
+    fn records_and_prices_without_cache_writes_still_read() {
+        let u: TokenUsage =
+            serde_json::from_str(r#"{"input_tokens":1,"output_tokens":2,"cached_input_tokens":3}"#)
+                .unwrap();
+        assert_eq!(u.cache_write_input_tokens, 0);
+        let p: Price = serde_json::from_str(r#"{"input":1,"output":2,"cached_input":3}"#).unwrap();
+        assert_eq!(p.cache_write, None);
     }
 
     #[test]
@@ -411,6 +448,7 @@ mod tests {
                 input: 1,
                 output: 1,
                 cached_input: 1,
+                cache_write: None,
             },
         );
         assert_eq!(
