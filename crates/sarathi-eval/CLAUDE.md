@@ -11,6 +11,9 @@ unless a caller passes a live provider explicitly.
   group; earlier records count; arms are `<harness>.<slot>`; `CappedRun::stopped` goes to `Report::stopped` and
   `ArmPair::stopped`).
 - `killline.rs`: the kill-line rule as one pure function; the tolerance is an input.
+- `measure.rs`: a `CappedRun` to its `Report`: stats per arm (slots, then harnesses, in configuration order), the kill
+  line over the old/new pair of each slot under a `Judging` rule stated before the run (old, new, strong slot, cost
+  fraction; accept tolerance = the old arm's spread), `stopped` passed to both; a slot with no runs is left out with a note.
 - `brief.rs`: brief-set JSONL format (header line, then briefs; unknown fields refused; split tuning/measurement).
 - `cassette.rs`: cassette JSONL format, reader and writer, request match naming the first differing field, secret scan.
 - `report.rs`: `report.md` and `report.json`, byte-stable for the same input.

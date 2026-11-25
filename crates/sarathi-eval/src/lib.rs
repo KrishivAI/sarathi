@@ -7,6 +7,7 @@ pub mod brief;
 pub mod cassette;
 pub mod config;
 pub mod killline;
+pub mod measure;
 pub mod metrics;
 pub mod report;
 pub mod runner;
