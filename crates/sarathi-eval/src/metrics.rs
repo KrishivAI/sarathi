@@ -17,9 +17,37 @@ pub struct TokenUsage {
     pub cached_input_tokens: u64,
 }
 
+/// The run-record format version this crate writes. It reads this version and the one before.
+pub const RUN_RECORD_VERSION: u32 = 1;
+
+/// Why briefs are being run. A tuning pass never touches the measurement split.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Purpose {
+    /// Developing against the tuning split.
+    Tune,
+    /// The measurement that decides the kill line.
+    Measure,
+}
+
+impl Purpose {
+    /// The directory name under the run date.
+    #[must_use]
+    pub fn dir(self) -> &'static str {
+        match self {
+            Self::Tune => "tune",
+            Self::Measure => "measure",
+        }
+    }
+}
+
 /// What one run of one brief by one arm produced.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RunRecord {
+    /// Record format version, [`RUN_RECORD_VERSION`].
+    pub version: u32,
+    /// Whether this run was a tuning pass or the measurement.
+    pub purpose: Purpose,
     /// Brief id.
     pub brief: String,
     /// Arm name (harness and model, e.g. `new/strong`).
@@ -71,6 +99,11 @@ pub enum MetricsError {
     /// The price table has no entry for the run's model.
     #[error("no price for model `{0}`")]
     NoPrice(String),
+    /// The arm's runs mix tuning and measurement passes, or are not all one purpose.
+    #[error(
+        "arm `{0}` has runs from more than one purpose (tuning and measurement must not be mixed)"
+    )]
+    MixedPurposes(String),
 }
 
 impl PriceTable {
@@ -115,6 +148,11 @@ pub struct BriefStats {
 pub struct ArmStats {
     /// Arm name.
     pub arm: String,
+    /// The purpose of every run counted (`None` when the arm has no runs). The kill line refuses anything but
+    /// the measurement.
+    pub purpose: Option<Purpose>,
+    /// Concrete model ids the runs used, sorted: the model per run is part of the result.
+    pub models: Vec<String>,
     /// Runs counted.
     pub runs: u32,
     /// Runs accepted.
@@ -171,6 +209,20 @@ pub fn arm_stats(
     runs: &[RunRecord],
     prices: &PriceTable,
 ) -> Result<ArmStats, MetricsError> {
+    let purpose = runs.iter().find(|r| r.arm == arm).map(|r| r.purpose);
+    if runs
+        .iter()
+        .any(|r| r.arm == arm && Some(r.purpose) != purpose)
+    {
+        return Err(MetricsError::MixedPurposes(arm.to_owned()));
+    }
+    let mut models: Vec<String> = runs
+        .iter()
+        .filter(|r| r.arm == arm)
+        .map(|r| r.model.clone())
+        .collect();
+    models.sort_unstable();
+    models.dedup();
     let mut by_brief: BTreeMap<&str, Vec<&RunRecord>> = BTreeMap::new();
     for r in runs.iter().filter(|r| r.arm == arm) {
         by_brief.entry(r.brief.as_str()).or_default().push(r);
@@ -209,6 +261,8 @@ pub fn arm_stats(
     walls.sort_unstable();
     Ok(ArmStats {
         arm: arm.to_owned(),
+        purpose,
+        models,
         runs: n_runs,
         accepted,
         accept_rate: briefs.iter().map(|b| b.accept_rate).sum::<f64>() / nb,
@@ -231,6 +285,8 @@ mod tests {
 
     fn run(brief: &str, arm: &str, n: u32, accepted: bool) -> RunRecord {
         RunRecord {
+            version: RUN_RECORD_VERSION,
+            purpose: Purpose::Measure,
             brief: brief.into(),
             arm: arm.into(),
             slot: String::new(),
@@ -340,5 +396,26 @@ mod tests {
         assert_eq!(percentile(&v, 95), 10);
         assert_eq!(percentile(&[7], 95), 7);
         assert_eq!(percentile(&[], 50), 0);
+    }
+
+    #[test]
+    fn stats_refuse_a_mix_of_tuning_and_measurement_runs() {
+        let mut a = run("b", "x", 0, true);
+        let mut b = run("b", "x", 1, true);
+        a.purpose = Purpose::Tune;
+        b.purpose = Purpose::Measure;
+        let mut t = PriceTable::default();
+        t.models.insert(
+            "m".into(),
+            Price {
+                input: 1,
+                output: 1,
+                cached_input: 1,
+            },
+        );
+        assert_eq!(
+            arm_stats("x", &[a, b], &t).err(),
+            Some(MetricsError::MixedPurposes("x".into()))
+        );
     }
 }
