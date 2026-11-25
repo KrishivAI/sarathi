@@ -65,8 +65,8 @@ pub struct Keep {
 /// # Errors
 /// [`ContextError::NotAtBoundary`] if a tool call has no result or a model call is in flight;
 /// [`ContextError::NoUserMessage`] if the segment has no turn start; [`ContextError::NothingToDrop`] if the last
-/// turn is kept and nothing before it can be dropped under `keep`; [`ContextError::Log`] for a log that does not resolve its own
-/// slices or is out of seqs.
+/// turn is kept and nothing before it can be dropped under `keep`; [`ContextError::Log`] for a log that does not
+/// resolve its own slices or is out of seqs.
 pub fn deterministic_seed(log: &Log, keep: Keep, ts: u64) -> Result<Seed, ContextError> {
     if !log.resume().at_boundary() {
         return Err(ContextError::NotAtBoundary);
@@ -175,10 +175,10 @@ pub fn deterministic_seed(log: &Log, keep: Keep, ts: u64) -> Result<Seed, Contex
     })
 }
 
-/// The deterministic seed that keeps the most for which `fits` says the log with the seed appended fits: the last
-/// turn kept, first with the segment's head kept, from `max_turns` earlier turns down to none, then without the head
-/// the same way; then, only between turns, the same two passes with the last turn dropped too, so a complete turn
-/// too large for the window does not block every later one.
+/// The deterministic seed that keeps the most for which `fits` says the log with the seed appended fits. With the
+/// segment's head kept: the last turn and from `max_turns` earlier turns down to none, then (only between turns) the
+/// same with the last turn dropped too, so a complete turn too large for the window does not block every later one;
+/// then the same two passes without the head. The head is dropped only when nothing with it fits.
 ///
 /// # Errors
 /// [`ContextError::DoesNotFit`] if no seed fits (while a turn is open: even the current turn alone does not fit);
@@ -201,9 +201,9 @@ pub fn shrink_to_fit(
         &[true, false]
     };
     let mut tried = false;
-    for (&last, &head) in lasts
+    for (&head, &last) in passes
         .iter()
-        .flat_map(|l| passes.iter().map(move |h| (l, h)))
+        .flat_map(|h| lasts.iter().map(move |l| (h, l)))
     {
         let mut turns = max_turns;
         loop {
