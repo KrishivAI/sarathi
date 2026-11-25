@@ -49,9 +49,10 @@ pub trait Acceptance {
 
 /// One arm: a name, a model, and the harness that runs it.
 pub struct Arm<'a> {
-    /// Arm name in the report.
+    /// Arm name in the report; every brief run on this arm must list it in `allowed_models` (briefs name arms, not
+    /// model ids, so the same set runs against whichever model a run configures for the arm).
     pub name: String,
-    /// Model id; every brief run on this arm must list it in `allowed_models`.
+    /// Model id, recorded with every run and used to price it.
     pub model: String,
     /// The harness.
     pub harness: &'a dyn Harness,
@@ -75,14 +76,17 @@ pub enum RunnerError {
     /// A measurement pass was given a tuning brief.
     #[error("brief {0} is in the tuning split and is not part of the measurement")]
     TuningInMeasurement(String),
-    /// A brief does not allow an arm's model.
-    #[error("brief {brief} does not allow model {model}")]
-    ModelNotAllowed {
+    /// A brief does not allow an arm.
+    #[error("brief {brief} does not allow arm {arm}")]
+    ArmNotAllowed {
         /// The brief id.
         brief: String,
-        /// The model id.
-        model: String,
+        /// The arm name.
+        arm: String,
     },
+    /// Two arms share a name, or an id would leave the run directory.
+    #[error("{0}")]
+    Invalid(String),
     /// No arms or no repetitions.
     #[error("a run needs at least one arm and one repetition")]
     Empty,
@@ -158,12 +162,22 @@ pub fn run_briefs(
         return Err(RunnerError::Empty);
     }
     guard_split(briefs, purpose)?;
+    for (i, a) in arms.iter().enumerate() {
+        check_component("arm name", &a.name)?;
+        if arms[..i].iter().any(|p| p.name == a.name) {
+            return Err(RunnerError::Invalid(format!(
+                "arm name `{}` is used twice",
+                a.name
+            )));
+        }
+    }
     for b in briefs {
+        check_component("brief id", &b.id)?;
         for a in arms {
-            if !b.allowed_models.iter().any(|m| m == &a.model) {
-                return Err(RunnerError::ModelNotAllowed {
+            if !b.allowed_models.iter().any(|m| m == &a.name) {
+                return Err(RunnerError::ArmNotAllowed {
                     brief: b.id.clone(),
-                    model: a.model.clone(),
+                    arm: a.name.clone(),
                 });
             }
         }
@@ -198,6 +212,21 @@ pub fn run_briefs(
         records.push(rec);
     }
     Ok(records)
+}
+
+/// An id becomes a directory name, so it must be a single plain path component.
+fn check_component(what: &str, id: &str) -> Result<(), RunnerError> {
+    let bad = id.is_empty()
+        || id == "."
+        || id == ".."
+        || id.contains(['/', '\\', '\0'])
+        || id.contains(':');
+    if bad {
+        return Err(RunnerError::Invalid(format!(
+            "{what} `{id}` is not a plain name (no path separators, `:` or `..`)"
+        )));
+    }
+    Ok(())
 }
 
 /// Where a record is written: `<root>/<date>/<arm>/<brief>/<run>.json`.
@@ -244,7 +273,7 @@ mod tests {
             split,
             site_context: "ctx".into(),
             text: "t".into(),
-            allowed_models: vec!["m".into()],
+            allowed_models: vec!["new".into()],
             acceptance: "a".into(),
         }
     }
@@ -333,25 +362,48 @@ mod tests {
     }
 
     #[test]
-    fn model_not_allowed_is_refused_before_any_run() {
+    fn an_arm_a_brief_does_not_allow_is_refused_before_any_run() {
         let h = Fake {
             log: RefCell::new(vec![]),
             fail_on: None,
         };
         let arms = [Arm {
             name: "x".into(),
-            model: "other".into(),
+            model: "m".into(),
             harness: &h,
         }];
         let bs = [brief("a", Split::Tuning)];
         let e = run_briefs(&bs, &arms, &AcceptOk, 1, Purpose::Tune).err();
         assert_eq!(
             e,
-            Some(RunnerError::ModelNotAllowed {
+            Some(RunnerError::ArmNotAllowed {
                 brief: "a".into(),
-                model: "other".into()
+                arm: "x".into()
             })
         );
+        assert!(h.log.borrow().is_empty());
+    }
+
+    #[test]
+    fn ids_that_would_leave_the_run_directory_and_duplicate_arms_are_refused() {
+        let h = Fake {
+            log: RefCell::new(vec![]),
+            fail_on: None,
+        };
+        let arm = |name: &str| Arm {
+            name: name.into(),
+            model: "m".into(),
+            harness: &h,
+        };
+        for bad in ["/etc/evil", "..", "a/b", "a\\b", ""] {
+            let mut b = brief(bad, Split::Tuning);
+            b.allowed_models = vec!["new".into()];
+            let e = run_briefs(&[b], &[arm("new")], &AcceptOk, 1, Purpose::Tune).err();
+            assert!(matches!(e, Some(RunnerError::Invalid(_))), "{bad}: {e:?}");
+        }
+        let bs = [brief("a", Split::Tuning)];
+        let e = run_briefs(&bs, &[arm("new"), arm("new")], &AcceptOk, 1, Purpose::Tune).err();
+        assert!(matches!(e, Some(RunnerError::Invalid(_))), "{e:?}");
         assert!(h.log.borrow().is_empty());
     }
 

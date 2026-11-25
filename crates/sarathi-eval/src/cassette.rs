@@ -243,7 +243,13 @@ pub fn write(c: &Cassette) -> Result<String, CassetteError> {
             return Err(CassetteError::BadFingerprint { seq: e.seq });
         }
         let line = serde_json::to_string(e).map_err(ser)?;
-        if let Some(what) = find_secret(&line) {
+        // The serialised line escapes `\n` and `\t`, which can hide a key behind a backslash letter, so the raw
+        // texts are scanned too.
+        let raw_hit = find_secret(&e.request).or_else(|| match &e.response {
+            Response::Body { body, .. } => find_secret(body),
+            Response::Stream { frames, .. } => frames.iter().find_map(|f| find_secret(&f.data)),
+        });
+        if let Some(what) = find_secret(&line).or(raw_hit) {
             return Err(CassetteError::Secret { seq: e.seq, what });
         }
         out.push_str(&line);
@@ -283,7 +289,7 @@ pub fn find_secret(text: &str) -> Option<String> {
     None
 }
 
-/// Check a request against a recorded entry. Equal bytes match. Otherwise the error names the first top-level field
+/// Check a request against a recorded entry. Only equal bytes match. Otherwise the error names the first top-level field
 /// (in sorted order) whose value differs, which is what a changed system prompt or tool list looks like.
 ///
 /// # Errors
@@ -306,8 +312,11 @@ pub fn match_request(entry: &Entry, actual: &str) -> Result<(), CassetteError> {
             return Err(CassetteError::Mismatch { field: k.clone() });
         }
     }
-    // Same value, different bytes (key order or spacing): the structure matches, so the call matches.
-    Ok(())
+    // Equal JSON with different bytes (key order, spacing, escapes): byte drift breaks provider-side prompt caching, so
+    // it is a mismatch, not a match.
+    Err(CassetteError::Mismatch {
+        field: "(bytes)".into(),
+    })
 }
 
 #[cfg(test)]
@@ -422,7 +431,23 @@ mod tests {
             })
         );
         let reordered = r#"{"messages":[],"tools":[],"system":"s"}"#;
-        assert!(match_request(e, reordered).is_ok());
+        assert_eq!(
+            match_request(e, reordered),
+            Err(CassetteError::Mismatch {
+                field: "(bytes)".into()
+            }),
+            "equal JSON with different bytes is byte drift"
+        );
+    }
+
+    #[test]
+    fn a_key_right_after_a_newline_in_a_body_is_found() {
+        let mut c = cassette();
+        c.entries[0].response = Response::Body {
+            status: 200,
+            body: "line\nsk-abcdefghijklmnopqrstuvwx".into(),
+        };
+        assert!(matches!(write(&c), Err(CassetteError::Secret { .. })));
     }
 
     #[test]

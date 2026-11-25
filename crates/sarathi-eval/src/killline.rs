@@ -38,6 +38,9 @@ pub struct ArmPair<'a> {
     pub old: &'a ArmStats,
     /// The new core.
     pub new: &'a ArmStats,
+    /// This arm's tolerance: the old harness's own spread differs per arm, so one tolerance for all arms would
+    /// misjudge the arms whose spread is larger or smaller.
+    pub tolerance: Tolerance,
 }
 
 /// How one arm fared.
@@ -73,16 +76,18 @@ pub struct KillLine {
     pub notes: Vec<String>,
 }
 
-fn accept_ok(p: &ArmPair<'_>, t: &Tolerance) -> bool {
+fn accept_ok(p: &ArmPair<'_>) -> bool {
+    let t = &p.tolerance;
     p.new.accept_rate + t.accept >= p.old.accept_rate - 1e-12
 }
 
-fn cost_ok(p: &ArmPair<'_>, t: &Tolerance) -> bool {
+fn cost_ok(p: &ArmPair<'_>) -> bool {
+    let t = &p.tolerance;
     match (p.old.cost_per_accepted_micro, p.new.cost_per_accepted_micro) {
         // Nothing accepted by the new arm while the old one accepted: not "equal on cost".
         (Some(_), None) => false,
         (None, _) => true,
-        (Some(o), Some(n)) => n as f64 <= o as f64 * (1.0 + t.cost_fraction),
+        (Some(o), Some(n)) => n as f64 <= o as f64 * (1.0 + t.cost_fraction) * (1.0 + 1e-9),
     }
 }
 
@@ -90,14 +95,14 @@ fn cost_ok(p: &ArmPair<'_>, t: &Tolerance) -> bool {
 /// rate misses on every non-strong arm (and there are at least two), which fails. No strong arm is a failure: the rule
 /// cannot be applied.
 #[must_use]
-pub fn evaluate(pairs: &[ArmPair<'_>], t: &Tolerance) -> KillLine {
+pub fn evaluate(pairs: &[ArmPair<'_>]) -> KillLine {
     let arms: Vec<ArmVerdict> = pairs
         .iter()
         .map(|p| ArmVerdict {
             name: p.name.to_owned(),
             strong: p.strong,
-            accept_ok: accept_ok(p, t),
-            cost_ok: cost_ok(p, t),
+            accept_ok: accept_ok(p),
+            cost_ok: cost_ok(p),
         })
         .collect();
     let mut notes = Vec::new();
@@ -178,11 +183,22 @@ mod tests {
     };
 
     fn pair<'a>(name: &'a str, strong: bool, old: &'a ArmStats, new: &'a ArmStats) -> ArmPair<'a> {
+        pair_t(name, strong, old, new, T)
+    }
+
+    fn pair_t<'a>(
+        name: &'a str,
+        strong: bool,
+        old: &'a ArmStats,
+        new: &'a ArmStats,
+        tolerance: Tolerance,
+    ) -> ArmPair<'a> {
         ArmPair {
             name,
             strong,
             old,
             new,
+            tolerance,
         }
     }
 
@@ -190,7 +206,7 @@ mod tests {
     fn higher_accept_and_lower_cost_passes() {
         let (o, n) = (arm(0.7, Some(100)), arm(0.9, Some(80)));
         assert_eq!(
-            evaluate(&[pair("strong", true, &o, &n)], &T).outcome,
+            evaluate(&[pair("strong", true, &o, &n)]).outcome,
             Outcome::Pass
         );
     }
@@ -200,11 +216,11 @@ mod tests {
         let o = arm(0.8, Some(100));
         let (within, beyond) = (arm(0.71, Some(100)), arm(0.69, Some(100)));
         assert_eq!(
-            evaluate(&[pair("s", true, &o, &within)], &T).outcome,
+            evaluate(&[pair("s", true, &o, &within)]).outcome,
             Outcome::Pass
         );
         assert_eq!(
-            evaluate(&[pair("s", true, &o, &beyond)], &T).outcome,
+            evaluate(&[pair("s", true, &o, &beyond)]).outcome,
             Outcome::Fail
         );
     }
@@ -213,11 +229,8 @@ mod tests {
     fn cost_over_tolerance_fails_on_strong_only() {
         let o = arm(0.8, Some(100));
         let n = arm(0.8, Some(106));
-        assert_eq!(
-            evaluate(&[pair("s", true, &o, &n)], &T).outcome,
-            Outcome::Fail
-        );
-        let kl = evaluate(&[pair("s", true, &o, &o), pair("cheap", false, &o, &n)], &T);
+        assert_eq!(evaluate(&[pair("s", true, &o, &n)]).outcome, Outcome::Fail);
+        let kl = evaluate(&[pair("s", true, &o, &o), pair("cheap", false, &o, &n)]);
         assert_eq!(kl.outcome, Outcome::Pass);
         assert!(
             kl.notes
@@ -230,23 +243,17 @@ mod tests {
     fn accept_miss_on_both_other_arms_fails() {
         let o = arm(0.8, Some(100));
         let bad = arm(0.5, Some(100));
-        let kl = evaluate(
-            &[
-                pair("s", true, &o, &o),
-                pair("a", false, &o, &bad),
-                pair("b", false, &o, &bad),
-            ],
-            &T,
-        );
+        let kl = evaluate(&[
+            pair("s", true, &o, &o),
+            pair("a", false, &o, &bad),
+            pair("b", false, &o, &bad),
+        ]);
         assert_eq!(kl.outcome, Outcome::Fail);
-        let one = evaluate(
-            &[
-                pair("s", true, &o, &o),
-                pair("a", false, &o, &bad),
-                pair("b", false, &o, &o),
-            ],
-            &T,
-        );
+        let one = evaluate(&[
+            pair("s", true, &o, &o),
+            pair("a", false, &o, &bad),
+            pair("b", false, &o, &o),
+        ]);
         assert_eq!(one.outcome, Outcome::Pass);
     }
 
@@ -259,15 +266,15 @@ mod tests {
             cost_fraction: 0.0,
         };
         assert_eq!(
-            evaluate(&[pair("s", true, &some, &none)], &t).outcome,
+            evaluate(&[pair_t("s", true, &some, &none, t)]).outcome,
             Outcome::Fail
         );
         assert_eq!(
-            evaluate(&[pair("s", true, &none, &some)], &t).outcome,
+            evaluate(&[pair_t("s", true, &none, &some, t)]).outcome,
             Outcome::Pass
         );
         assert_eq!(
-            evaluate(&[pair("s", true, &none, &none)], &t).outcome,
+            evaluate(&[pair_t("s", true, &none, &none, t)]).outcome,
             Outcome::Pass
         );
     }
@@ -275,10 +282,7 @@ mod tests {
     #[test]
     fn no_strong_arm_fails() {
         let o = arm(0.8, Some(100));
-        assert_eq!(
-            evaluate(&[pair("a", false, &o, &o)], &T).outcome,
-            Outcome::Fail
-        );
+        assert_eq!(evaluate(&[pair("a", false, &o, &o)]).outcome, Outcome::Fail);
     }
 
     #[test]
@@ -291,5 +295,40 @@ mod tests {
                 cost_fraction: 0.05
             }
         );
+    }
+
+    #[test]
+    fn each_arm_is_judged_by_its_own_spread() {
+        // The strong arm's old spread is small; the other arms' are large. A 0.10 drop on both other arms is within
+        // their own spread, so it is not a miss and the outcome stays Pass.
+        let o = arm(0.8, Some(100));
+        let drop = arm(0.7, Some(100));
+        let tight = Tolerance {
+            accept: 0.05,
+            cost_fraction: 0.05,
+        };
+        let wide = Tolerance {
+            accept: 0.30,
+            cost_fraction: 0.05,
+        };
+        let kl = evaluate(&[
+            pair_t("s", true, &o, &o, tight),
+            pair_t("a", false, &o, &drop, wide),
+            pair_t("b", false, &o, &drop, wide),
+        ]);
+        assert_eq!(kl.outcome, Outcome::Pass, "{:?}", kl.notes);
+        let strict = evaluate(&[
+            pair_t("s", true, &o, &o, tight),
+            pair_t("a", false, &o, &drop, tight),
+            pair_t("b", false, &o, &drop, tight),
+        ]);
+        assert_eq!(strict.outcome, Outcome::Fail);
+    }
+
+    #[test]
+    fn cost_exactly_at_the_tolerance_passes() {
+        let o = arm(0.8, Some(100));
+        let n = arm(0.8, Some(105));
+        assert_eq!(evaluate(&[pair("s", true, &o, &n)]).outcome, Outcome::Pass);
     }
 }

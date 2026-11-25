@@ -40,7 +40,7 @@ fn once() -> Result<(String, String), String> {
             split: Split::Measurement,
             site_context: "c".into(),
             text: "t".into(),
-            allowed_models: vec!["m".into()],
+            allowed_models: vec!["new".into()],
             acceptance: "a".into(),
         })
         .collect();

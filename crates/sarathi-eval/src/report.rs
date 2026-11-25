@@ -141,15 +141,13 @@ mod tests {
             &prices,
         )
         .unwrap();
-        let kl = evaluate(
-            &[ArmPair {
-                name: "strong",
-                strong: true,
-                old: &old,
-                new: &new,
-            }],
-            &Tolerance::from_old_spread(&old, 0.05),
-        );
+        let kl = evaluate(&[ArmPair {
+            name: "strong",
+            strong: true,
+            old: &old,
+            new: &new,
+            tolerance: Tolerance::from_old_spread(&old, 0.05),
+        }]);
         Report {
             date: "2026-11-24".into(),
             arms: vec![old, new],
