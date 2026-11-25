@@ -37,7 +37,7 @@ SOFTWARE.
 
 --------------------------------------------------------------------------------
 Vyasa (https://github.com/vyasa-cms/vyasa), MIT OR Apache-2.0, used under Apache-2.0: three files of
-crates/sarathi-provider/src/resilience/ are rewritten from it at 2403be1a61f4e3147019671c49b95c02afe91a99
-(listed in PROVENANCE.md, each with a header line naming it).
+crates/sarathi-provider/src/resilience/ and three of crates/sarathi-core/src/ are rewritten from it at
+2403be1a61f4e3147019671c49b95c02afe91a99 (listed in PROVENANCE.md, each with a header line naming it).
 
 Code copied from any other project adds its notice here.

@@ -49,7 +49,8 @@ copied file keeps a header line `// Derived from Ultrafast Gateway @ <short hash
 
 ## Vyasa
 
-Three files of `sarathi-provider::resilience` are rewritten from Vyasa (<https://github.com/vyasa-cms/vyasa>).
+Three files of `sarathi-provider::resilience` and three of `sarathi-core` (the run loop) are rewritten from Vyasa
+(<https://github.com/vyasa-cms/vyasa>).
 
 | Field | Value |
 |---|---|
@@ -64,6 +65,16 @@ Three files of `sarathi-provider::resilience` are rewritten from Vyasa (<https:/
 | `budget.rs` | `budget.rs` | whole micro-dollars (`u64`) instead of `f64` dollars; the window is the caller's (the original fixed the UTC month); the error is `ErrorKind::BudgetExceeded` |
 
 Each file keeps a header line naming its source above its SPDX line.
+
+### The run loop (`sarathi-core`), from `crates/ai/src/agent.rs` @ `2403be1`
+
+Rewritten as a state machine with no IO (Vyasa's loop is one async function).
+
+| Written to (`crates/sarathi-core/src/`) | From | Changes |
+|---|---|---|
+| `step.rs` | `agent.rs`: `StepReply`, the correction, unknown-tool, refusal and ran-out wordings | the step is read with its `input` bytes kept as written; a fenced step is read; the unknown-tool text has a form without `"done"` for native tool calls |
+| `profile.rs` | `agent.rs`: `step_schema`, `protocol` | the schema is a constant; the protocol text says results come back as `observation:` messages and drops the page-specific sentence (the host's system prompt carries it) |
+| `core.rs` | `agent.rs`: `run_agent`, `MAX_STEPS_CEILING`, `MAX_CONSECUTIVE_FAILURES` | a multi-turn conversation instead of a transcript rebuilt every step (the prefix stays byte-stable); no observation truncation or collapsing (context size is handled elsewhere); native tool calls, permissions, steering, interrupts, a spend cap and a repeated-call guard are new |
 
 ## Rules
 
