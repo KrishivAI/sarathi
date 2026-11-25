@@ -71,6 +71,7 @@ impl Script {
         self.push(Body::ModelRequest {
             recipe,
             sha256: "0".repeat(64),
+            compaction: None,
         });
         let body = format!(r#"{{"id":"m","content":{content}}}"#);
         let start = u32::try_from(body.find('[').unwrap()).unwrap();
@@ -286,6 +287,7 @@ fn a_tool_round_or_a_model_call_in_flight_is_never_cut() {
     s.push(Body::ModelRequest {
         recipe,
         sha256: "0".repeat(64),
+        compaction: None,
     });
     assert!(matches!(
         deterministic_seed(&s.log, keep(0), 1),
@@ -573,10 +575,7 @@ impl Script {
         self.log
             .append(self.log.next_seq(), req.entries.clone())
             .unwrap();
-        self.push(Body::ModelRequest {
-            recipe: req.recipe.clone(),
-            sha256: "0".repeat(64),
-        });
+        self.push(req.model_request("0".repeat(64)));
         self.response(body)
     }
 
@@ -600,6 +599,7 @@ impl Script {
         self.push(Body::ModelRequest {
             recipe,
             sha256: "0".repeat(64),
+            compaction: None,
         });
         let body = format!(r#"{{"content":[{{"type":"text","text":"done {n}"}}]}}"#);
         let from = self.push(Body::ModelResponse {
@@ -801,14 +801,22 @@ fn a_client_summary_seeds_the_next_segment_with_one_user_message() {
     let mut t = Script::new();
     t.turn(1);
     let req = compaction_request(&t.log, Compactor::ClientSummary, &raw("{}"), None, 5).unwrap();
-    t.call(
-        &req,
+    for body in [
         r#"{"content":[{"type":"text","text":"  "}],"stop_reason":"end_turn"}"#,
-    );
-    assert!(matches!(
-        compaction_seed(&t.log, 6),
-        Err(ContextError::CompactionFailed { .. })
-    ));
+        r#"{"content":[{"type":"text","text":"The user wants"}],"stop_reason":"max_tokens"}"#,
+        r#"{"content":[{"type":"text","text":"Let me check."},{"type":"tool_use","id":"t","name":"look","input":{}}],"stop_reason":"end_turn"}"#,
+        r#"{"content":"The user wants","stop_reason":null,"choices":[{"finish_reason":"length"}]}"#,
+    ] {
+        let mut u = Script { log: t.log.clone() };
+        u.call(&req, body);
+        assert!(
+            matches!(
+                compaction_seed(&u.log, 6),
+                Err(ContextError::CompactionFailed { .. })
+            ),
+            "{body}"
+        );
+    }
 }
 
 #[test]
@@ -916,41 +924,45 @@ fn the_estimate_is_the_last_usage_plus_the_bytes_after_it() {
 }
 
 #[test]
-fn before_request_counts_near_a_limit_compacts_between_turns_and_overflows_past_the_limit() {
-    let mut p = ContextProfile::new(100_000, 10_000);
-    p.compactor = Compactor::ClientSummary;
-    assert_eq!(p.limit(), 90_000);
-    assert_eq!(p.compact_at(), 75_000);
+fn before_request_counts_near_a_point_compacts_before_the_limit_and_overflows_past_it() {
+    // A large answer budget (32% of the window): compaction still comes first.
+    let mut p = ContextProfile::new(200_000, 64_000);
+    assert_eq!(p.limit(), 136_000);
+    assert_eq!(p.compact_at(), 102_000);
     let mut s = Script::new();
     s.sized_turn(1, 50_000);
     assert_eq!(
         before_request(&s.log, &p, None).unwrap(),
         ContextAction::None
     );
-    s.sized_turn(2, 70_000);
+    s.sized_turn(2, 100_000);
     assert_eq!(
         before_request(&s.log, &p, None).unwrap(),
         ContextAction::CountTokens,
-        "within 10% of 75,000"
+        "within 10% of 102,000"
     );
+    let at = |n| before_request(&s.log, &p, Some(n)).unwrap();
+    assert_eq!(at(101_000), ContextAction::None);
+    assert_eq!(at(103_000), ContextAction::Compact(Compactor::Server));
     assert_eq!(
-        before_request(&s.log, &p, Some(74_000)).unwrap(),
-        ContextAction::None
+        at(150_000),
+        ContextAction::Compact(Compactor::Server),
+        "past the limit, a summary still beats the fallback"
     );
+    assert_eq!(at(200_001), ContextAction::Overflow, "past the window");
+
+    // Inside a turn, server compaction is not possible: past the limit it overflows.
+    s.user("next");
+    let at = |p: &ContextProfile, n| before_request(&s.log, p, Some(n)).unwrap();
+    assert_eq!(at(&p, 120_000), ContextAction::None);
+    assert_eq!(at(&p, 140_000), ContextAction::Overflow);
+    // A client summary may run inside a turn.
+    p.compactor = Compactor::ClientSummary;
     assert_eq!(
-        before_request(&s.log, &p, Some(76_000)).unwrap(),
+        at(&p, 120_000),
         ContextAction::Compact(Compactor::ClientSummary)
     );
-    // Inside a turn there is no compaction, only overflow.
-    s.user("next");
-    assert_eq!(
-        before_request(&s.log, &p, Some(76_000)).unwrap(),
-        ContextAction::None
-    );
-    assert_eq!(
-        before_request(&s.log, &p, Some(95_000)).unwrap(),
-        ContextAction::Overflow
-    );
+
     // An open tool call: no decision at all.
     s.respond(
         r#"[{"type":"tool_use","id":"toolu_x","name":"edit","input":{}}]"#,
@@ -960,6 +972,131 @@ fn before_request_counts_near_a_limit_compacts_between_turns_and_overflows_past_
         before_request(&s.log, &p, None),
         Err(ContextError::NotAtBoundary)
     ));
+}
+
+#[test]
+fn a_provider_overflow_forces_the_fallback_and_each_one_at_least_halves_the_request() {
+    let mut s = Script::new();
+    for n in 1..=6 {
+        s.turn(n);
+    }
+    let p = ContextProfile::new(1_000_000, 0);
+    let mut kept = usize::MAX;
+    for round in 0..20 {
+        s.user(&format!("round {round}"));
+        let recipe = s.log.next_recipe(raw("{}")).unwrap();
+        s.push(Body::ModelRequest {
+            recipe,
+            sha256: "0".repeat(64),
+            compaction: None,
+        });
+        s.push(Body::ModelFailure {
+            error: "context_overflow".into(),
+            status: Some(400),
+            detail: "prompt is too long".into(),
+            request_id: None,
+            retries: 0,
+        });
+        assert_eq!(
+            before_request(&s.log, &p, Some(10)).unwrap(),
+            ContextAction::Overflow,
+            "the provider's refusal outranks the count"
+        );
+        match overflow_seed(&s.log, &p, 9) {
+            Ok(seed) => {
+                let before = estimate(&s.log);
+                s.apply(&seed);
+                assert!(estimate(&s.log) <= before / 2, "round {round}");
+                assert!(seed.kept_turns <= kept);
+                kept = seed.kept_turns;
+            }
+            Err(ContextError::DoesNotFit) => return,
+            Err(e) => panic!("round {round}: {e}"),
+        }
+    }
+    panic!("no end after 20 refusals");
+}
+
+#[test]
+fn the_estimate_counts_bytes_when_usage_is_missing_and_after_a_compaction() {
+    let mut s = Script::new();
+    // `turn` reports no usage: the whole projection is counted by bytes.
+    s.turn(1);
+    let one = estimate(&s.log);
+    assert!(one > 0);
+    s.turn(2);
+    assert!(estimate(&s.log) > one, "grows with the bytes");
+
+    let req = compaction_request(&s.log, Compactor::Server, &raw("{}"), None, 5).unwrap();
+    s.call(&req, &server_answer(BLOCK, "compaction"));
+    let seed = compaction_seed(&s.log, 6).unwrap();
+    s.apply(&seed);
+    let bytes = r#""be brief""#.len() + "[]".len() + BLOCK.len();
+    assert_eq!(
+        estimate(&s.log),
+        u64::try_from(bytes * 2).unwrap().div_ceil(7)
+    );
+}
+
+#[test]
+fn a_steer_sent_after_the_last_request_is_counted() {
+    let mut s = Script::new();
+    s.user("task");
+    let recipe = s.log.next_recipe(raw("{}")).unwrap();
+    s.push(Body::ModelRequest {
+        recipe,
+        sha256: "0".repeat(64),
+        compaction: None,
+    });
+    s.push(Body::UserMessage {
+        content: RawJson::string("abcdefg"),
+        steer: true,
+    });
+    let body = r#"{"content":[{"type":"text","text":"ok"}]}"#;
+    let from = s.push(Body::ModelResponse {
+        content: 11..u32::try_from(body.len() - 1).unwrap(),
+        body: raw(body),
+        sse: None,
+        request_id: None,
+        usage: Usage {
+            input_tokens: 100,
+            ..Usage::default()
+        },
+    });
+    s.push(Body::AssistantMessage {
+        from,
+        calls: Vec::new(),
+    });
+    assert_eq!(estimate(&s.log), 100 + 3);
+}
+
+#[test]
+fn a_turn_request_in_flight_is_no_compaction() {
+    let mut s = Script::new();
+    s.turn(1);
+    s.user("task 2");
+    let recipe = s.log.next_recipe(raw(r#"{"model":"m"}"#)).unwrap();
+    s.push(Body::ModelRequest {
+        recipe,
+        sha256: "0".repeat(64),
+        compaction: None,
+    });
+    assert!(s.log.resume().pending_model.is_some());
+    assert_eq!(pending_compaction(&s.log), None);
+    // The first request after an overflow seed sends an earlier segment's seed slice last: still no compaction.
+    let mut t = Script::new();
+    for n in 1..=3 {
+        t.turn(n);
+    }
+    let seed = deterministic_seed(&t.log, keep(0), 1).unwrap();
+    t.apply(&seed);
+    let recipe = t.log.next_recipe(raw("{}")).unwrap();
+    t.push(Body::ModelRequest {
+        recipe,
+        sha256: "0".repeat(64),
+        compaction: None,
+    });
+    assert_eq!(pending_compaction(&t.log), None);
 }
 
 #[test]
@@ -998,10 +1135,32 @@ fn compaction_needs_a_boundary_and_object_params() {
         Err(ContextError::NotAtBoundary)
     ));
     s.result("toolu_1");
+    assert!(
+        matches!(
+            compaction_request(&s.log, Compactor::Server, &raw("{}"), None, 1),
+            Err(ContextError::NotAtBoundary)
+        ),
+        "a server block needs the next user message after it"
+    );
+    let client = compaction_request(&s.log, Compactor::ClientSummary, &raw("{}"), None, 1).unwrap();
+    assert_eq!(client.compactor, Compactor::ClientSummary);
+    s.respond(r#"[{"type":"text","text":"done"}]"#, &[]);
+    s.push(Body::TurnEnd {
+        outcome: "finished".into(),
+    });
     assert!(matches!(
         compaction_request(&s.log, Compactor::Server, &raw("[]"), None, 1),
         Err(ContextError::BadParams(_))
     ));
+    assert_eq!(
+        compaction_request(&s.log, Compactor::Server, &raw("{}"), Some(""), 1)
+            .unwrap()
+            .recipe
+            .params
+            .as_str(),
+        r#"{"compaction":{"type":"summarize"}}"#,
+        "empty instructions are none"
+    );
     let long = "x".repeat(MAX_INSTRUCTIONS + 1);
     assert!(matches!(
         compaction_request(&s.log, Compactor::Server, &raw("{}"), Some(&long), 1),
