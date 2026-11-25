@@ -18,6 +18,10 @@ impl std::fmt::Display for Seq {
 }
 
 /// Who a message is from, as the Messages API names it.
+///
+/// A role this version does not know (say `"developer"`) is an error when read, not an `Unknown` variant: a message
+/// is never sent back to a model under a guessed role. A new role is added here before any writer uses it.
+#[non_exhaustive]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Role {
@@ -86,6 +90,15 @@ impl MessageSlice {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_unknown_role_is_an_error() {
+        assert_eq!(
+            serde_json::from_str::<Role>(r#""system""#).unwrap(),
+            Role::System
+        );
+        assert!(serde_json::from_str::<Role>(r#""developer""#).is_err());
+    }
 
     #[test]
     fn a_slice_keeps_content_bytes() {
