@@ -1,3 +1,4 @@
+// Derived from Vyasa `crates/ai/src/agent.rs` @ 2403be1 (MIT OR Apache-2.0); see PROVENANCE.md
 // SPDX-License-Identifier: Apache-2.0
 //! The core's turns as input and action sequences.
 

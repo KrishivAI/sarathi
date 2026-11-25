@@ -12,8 +12,8 @@
 //! sends the rewritten call through the policy again, where only an allow lets it run (the host agreed to the call
 //! the model made, not to the rewrite). The host's "allow always" is the core's, not the policy's, so it does not
 //! cover a rewrite either: a hook that rewrites a tool the policy would ask about refuses it on every call. The log
-//! keeps the model's input; the rewritten input that ran is not recorded. A toolbox has no stop signal: an interrupted side-effecting call runs until
-//! the driver's grace period ends and is then dropped.
+//! keeps the model's input; the rewritten input that ran is not recorded. A toolbox has no stop signal: an
+//! interrupted side-effecting call runs until the driver's grace period ends and is then dropped.
 
 use sarathi_protocol::{CallId, RawJson, ToolOutput};
 use sarathi_tools::{Hooks, Policy, ToolSpec, Toolbox, Verdict};

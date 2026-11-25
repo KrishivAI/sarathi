@@ -22,12 +22,15 @@ gate.
   their `ToolDef`s (read-only reads, everything else writes).
 - `src/anthropic.rs` (feature `anthropic`, default): `AnthropicCaller` over a provider chain of one model, and the
   request assembler from the log's parts.
+- `src/openai.rs` (feature `openai`, default): the OpenAI-style chat caller, with the request spliced from slices
+  rendered once.
 - `tests/driver.rs` (+ `tests/common/`): the loop tests on both protocols, the native round trip, asks, steers and
   interrupts, failed writes and dropped futures, resume at every append. `tests/kill_and_resume.rs` (feature
   `fault-injection`): a child process aborted after every append, and inside a write, on the JSONL store.
 - `tests/context.rs`: compaction between turns (both compactors), a summary in a tool loop, an answer that is no
   summary, the fallback after a refusal, restarts at every append of a compaction (between turns and in a turn),
   spill.
+- `tests/openai.rs`: the OpenAI-style caller through the driver.
 - `tests/toolbox.rs`: a toolbox through the driver: asks, a deny rule on the subject, plan mode, hooks, `Err` as an
   observation.
 - `tests/tool_uses_answered.rs`: property over random runs (every tool call answered before a request or a turn end,
@@ -37,7 +40,8 @@ gate.
 - The core numbers entries: each `Append` names its first seq and `CallModel` the request's seq; the driver appends
   exactly that; when an append or the request cannot be written it sends `Input::Aborted` with the store's next
   seq (recoverable only at rest or before the request is written; otherwise `Core::needs_rebuild()` and the
-  driver makes a new core from the log). Model answers and failures name the request's seq, so a cancelled call's late answer is refused.
+  driver makes a new core from the log). Model answers and failures name the request's seq, so a cancelled call's
+  late answer is refused.
 - Every tool call of an accepted answer gets one `ToolResult` before the next `CallModel` and before `EndTurn`.
 - Answer + `AssistantMessage` are one durable batch; a write tool's `ToolStart` and `ToolResult` are durable.
 - `Verdict` is the tools crate's. A host's toolbox, policy and hooks reach the driver through `toolbox::ToolboxTools`
@@ -54,7 +58,6 @@ gate.
   the Anthropic caller adds `COMPACTION_BETA` itself when a request asks for compaction or sends a block back.
 - A spilled output is in the spill store (durable) before the `tool.result` that names it is written.
 - `fault-injection` is for tests only; never on in a host's build.
-
 - A request that cannot fit even after the fallback is never sent: between turns `DriverError::DoesNotFit` (op not
   run), in a turn an abort with kind `guard`. An interrupt during the check before a turn ends it before it starts
   (`DriverError::Interrupted`); in a turn, one during a compaction call is read when the call returns.

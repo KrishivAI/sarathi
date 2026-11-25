@@ -843,6 +843,7 @@ async fn a_steer_sent_before_a_turn_dropped_during_its_compaction_reaches_the_ne
         Reply::Slow(Duration::from_secs(10), body_of(compacted())),
         compacted(),
         said("Second.", 50),
+        said("Red it is.", 50),
     ];
     let (mut d, model, _) =
         driver_with(profile(Compactor::Server), replies, TestTools::default()).await;
@@ -864,11 +865,15 @@ async fn a_steer_sent_before_a_turn_dropped_during_its_compaction_reaches_the_ne
         .run_turn(user("Now the next thing."), &mut |_| {})
         .await
         .unwrap();
+    // The steer was held through the dropped turn; the model's answer is not the turn's end while a held message
+    // may still go out, so the steer is sent and the turn goes on to the next answer.
     let sent = model
         .bodies()
         .iter()
         .any(|b| text_of(b).contains("use red"));
-    let held = format!("{:?}", end.unsent).contains("use red");
-    assert!(sent || held, "the steer is kept: {end:?}");
+    assert!(sent, "the steer reaches the next turn: {end:?}");
+    assert!(end.unsent.is_empty(), "nothing comes back unsent: {end:?}");
+    assert_eq!(end.outcome, Outcome::Finished);
+    assert_eq!(end.reply.as_deref(), Some("Red it is."));
     check_log(d.log());
 }
