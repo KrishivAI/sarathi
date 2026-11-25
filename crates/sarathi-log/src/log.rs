@@ -235,7 +235,17 @@ impl Log {
                 }
             },
             Body::SegmentSeed { from: Some(f), .. } => {
-                self.expect_slice(*f).map_err(invalid)?;
+                if !matches!(
+                    self.get(*f).map(|x| &x.body),
+                    Some(Body::ModelResponse { .. })
+                ) {
+                    self.expect_slice(*f).map_err(|_| {
+                        invalid(format!(
+                            "`from` {} is not a message slice or a model.response",
+                            f.0
+                        ))
+                    })?;
+                }
             }
             Body::ModelRequest { recipe, sha256 } => {
                 match self.get(recipe.prefix).map(|p| &p.body) {
@@ -415,7 +425,9 @@ impl Log {
                     last_request = Some(e.seq);
                     answered = false;
                 }
-                Body::ModelFailure { .. } => answered = true,
+                // A `segment.start` comes only at a boundary: one after an unanswered request ends a compaction
+                // call, whose answer went into the seed instead of a `message.assistant`.
+                Body::ModelFailure { .. } | Body::SegmentStart { .. } => answered = true,
                 Body::AssistantMessage { from, calls: asked } => {
                     if last_request.is_some_and(|r| *from > r) {
                         answered = true;
