@@ -74,7 +74,8 @@ async fn driver(
     SharedGate,
 ) {
     let (tools, gate) = ToolboxTools::new(page.clone(), policy, Hooks::new())
-        .with_gate(EvidenceKinds::new(["look"]));
+        .with_gate(EvidenceKinds::new(["look"]))
+        .unwrap();
     let defs = tools.defs().unwrap();
     let model = Scripted::new(replies);
     let config = DriverConfig::new(ModelProfile::native(), defs, "You are a test.")
@@ -92,7 +93,7 @@ async fn driver(
     (d, model, gate)
 }
 
-/// How many requests the model got, and the text of the user messages the core wrote (steers) after the first.
+/// The text of the user messages the core wrote after the first (the steers: a finish sent back).
 fn steers(log: &sarathi_log::Log) -> Vec<String> {
     log.entries()
         .iter()
@@ -125,6 +126,11 @@ async fn a_look_the_policy_denies_is_no_evidence() {
     check_log(d.log());
     assert_eq!(end.outcome, Outcome::RanOut, "no evidence is ever recorded");
     assert!(!gate.verdict().is_accepted());
+    assert_eq!(
+        steers(d.log()).len(),
+        sarathi_core::MAX_COMPLETION_REFUSALS as usize,
+        "the run ended by the gate's refusal limit, not the step limit"
+    );
     let first = results(d.log())
         .into_iter()
         .find(|r| r.0 == "toolu_2")
@@ -160,4 +166,47 @@ async fn the_plan_carries_over_and_an_edit_in_a_later_turn_makes_the_evidence_st
         "only the finish after the edit is sent back: {steers:?}"
     );
     assert!(gate.verdict().is_accepted());
+}
+
+#[tokio::test]
+async fn a_look_that_fails_records_no_evidence() {
+    let page = Page::default();
+    *page.broken.lock().unwrap() = true;
+    let replies = vec![
+        plan(1),
+        call(2, "look", "{}"),
+        finish(),
+        finish(),
+        finish(),
+        finish(),
+    ];
+    let (mut d, _, gate) = driver(&page, Policy::new(Mode::AcceptEdits), replies).await;
+    let end = d.run_turn(user("Work."), &mut |_| {}).await.unwrap();
+    check_log(d.log());
+    assert_eq!(end.outcome, Outcome::RanOut);
+    assert!(
+        !gate.verdict().is_accepted(),
+        "a failed look is no evidence"
+    );
+    let first = results(d.log())
+        .into_iter()
+        .find(|r| r.0 == "toolu_2")
+        .unwrap();
+    assert!(first.2, "the failed look is an error result: {first:?}");
+}
+
+#[tokio::test]
+async fn a_host_tool_named_plan_is_refused_by_the_gate() {
+    #[derive(Debug)]
+    struct Planner;
+    impl Toolbox for Planner {
+        fn tools(&self) -> Vec<ToolSpec> {
+            vec![ToolSpec::new("plan", "the host's own", json!({"type":"object"})).read_only()]
+        }
+        fn call<'a>(&'a mut self, _: &str, _: &Value) -> BoxFuture<'a, Result<String, String>> {
+            Box::pin(std::future::ready(Ok(String::new())))
+        }
+    }
+    let tools = ToolboxTools::new(Planner, Policy::new(Mode::AcceptEdits), Hooks::new());
+    assert!(tools.with_gate(EvidenceKinds::new(["look"])).is_err());
 }
