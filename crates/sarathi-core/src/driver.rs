@@ -15,6 +15,7 @@ mod entries;
 mod seams;
 
 use std::collections::VecDeque;
+use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use sarathi_log::{Body, Entry, Log, LogError, LogStore, SessionId, sha256_hex};
@@ -27,7 +28,9 @@ pub use self::seams::{
     AskByOp, AskReply, BoxFuture, CallFailure, DenyAsks, ModelCaller, PermissionHost, Received,
     Spill, StopSignal, Tools,
 };
-use crate::core::{Action, Core, CoreConfig, Durability, Input, Limits, Running, TurnEnd};
+use crate::core::{
+    Action, Completion, Core, CoreConfig, Durability, Input, Limits, Running, TurnEnd,
+};
 use crate::profile::{ModelProfile, ToolDef};
 pub use sarathi_context::{Compactor, ContextProfile, SpillLimits};
 
@@ -48,6 +51,8 @@ pub struct DriverConfig {
     pub context: Option<ContextProfile>,
     /// Where tool output over a size limit goes; `None`: every output stays in the log.
     pub spill: Option<Spill>,
+    /// The host's check on a finish (the completion gate), if it has one.
+    pub completion: Option<Arc<dyn Completion>>,
 }
 
 impl DriverConfig {
@@ -60,6 +65,7 @@ impl DriverConfig {
             system: system.into(),
             context: None,
             spill: None,
+            completion: None,
         }
     }
 
@@ -74,6 +80,13 @@ impl DriverConfig {
     #[must_use]
     pub fn with_spill(mut self, spill: Spill) -> Self {
         self.spill = Some(spill);
+        self
+    }
+
+    /// The same config sending a finish through `completion` ([`Completion`]).
+    #[must_use]
+    pub fn with_completion(mut self, completion: Arc<dyn Completion>) -> Self {
+        self.completion = Some(completion);
         self
     }
 
@@ -212,6 +225,7 @@ where
         let mut core_config = CoreConfig::new(config.profile.clone(), config.tools.clone(), Seq(1));
         core_config.limits = config.limits.clone();
         core_config.next_seq = Seq(2);
+        core_config.completion = config.completion.clone();
         let core = Core::new(core_config);
         Ok(Self::make(
             config,

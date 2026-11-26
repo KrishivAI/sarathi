@@ -20,6 +20,10 @@ pub struct Report {
     pub kill_line: Option<KillLine>,
     /// Entries in `deviations.md`: changes made after the first run (the evaluation protocol).
     pub deviations: u32,
+    /// Slots stopped at their spend cap ([`crate::config::CappedRun::stopped`]): their arms are incomplete. Left out
+    /// of `report.json` when empty, so a run that never hit a cap reports as before.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub stopped: Vec<String>,
 }
 
 /// `report.json`: pretty, stable key order, trailing newline.
@@ -73,6 +77,11 @@ pub fn to_markdown(r: &Report) -> String {
         o.push_str(&format!(
             "- price {m}: input {}, output {}, cached input {} (micro-dollars per million tokens)\n",
             p.input, p.output, p.cached_input
+        ));
+    }
+    for s in &r.stopped {
+        o.push_str(&format!(
+            "- slot {s}: stopped at its spend cap; its arms are incomplete\n"
         ));
     }
     o.push('\n');
@@ -165,6 +174,7 @@ mod tests {
             old: &old,
             new: &new,
             tolerance: Tolerance::from_old_spread(&old, 0.05),
+            stopped: false,
         }]);
         Report {
             date: "2026-11-24".into(),
@@ -172,6 +182,7 @@ mod tests {
             prices,
             kill_line: Some(kl),
             deviations: 0,
+            stopped: vec![],
         }
     }
 
@@ -197,6 +208,22 @@ mod tests {
         let mut r = report();
         r.arms[0].cost_per_accepted_micro = None;
         assert!(to_markdown(&r).contains("n/a"));
+    }
+
+    #[test]
+    fn a_stopped_slot_is_reported_and_kept_out_of_json_when_none() {
+        let mut r = report();
+        assert!(!to_json(&r).unwrap().contains("stopped"));
+        r.stopped = vec!["strong".into()];
+        assert!(
+            to_markdown(&r)
+                .contains("- slot strong: stopped at its spend cap; its arms are incomplete")
+        );
+        assert!(
+            to_json(&r)
+                .unwrap()
+                .contains("\"stopped\": [\n    \"strong\"\n  ]")
+        );
     }
 
     #[test]

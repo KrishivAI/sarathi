@@ -372,7 +372,7 @@ struct CompactionBlock<'a> {
     signature: Option<std::borrow::Cow<'a, str>>,
 }
 
-fn block_types(content: &RawJson) -> Vec<String> {
+pub(crate) fn block_types(content: &RawJson) -> Vec<String> {
     serde_json::from_str::<Vec<Kind<'_>>>(content.as_str())
         .map(|bs| {
             bs.into_iter()

@@ -271,6 +271,26 @@ impl Gate {
         Ok(())
     }
 
+    /// Evidence of `kind` for every criterion that asked for that kind, gathered now. For a host tool that does not
+    /// know which criterion it serves (a `look` shows the whole page): the model's plan says what each criterion
+    /// needs, and one fresh result of the kind serves them all. Returns how many criteria it served (zero when the
+    /// plan has none of that kind; nothing is recorded then).
+    pub fn record_evidence_of_kind(&mut self, kind: &str, summary: &str) -> usize {
+        let summary = bounded(summary);
+        let mut served = 0;
+        for c in self.criteria.iter().filter(|c| &*c.kind == kind) {
+            self.evidence.insert(
+                c.id.clone(),
+                Evidence {
+                    at: self.edits,
+                    summary: summary.clone(),
+                },
+            );
+            served += 1;
+        }
+        served
+    }
+
     /// The summary of the evidence held for `id`, fresh or not.
     #[must_use]
     pub fn evidence_for(&self, id: &str) -> Option<&str> {
@@ -308,6 +328,19 @@ impl Gate {
     }
 }
 
+/// Longest evidence summary kept, in bytes: enough to say what was seen, small enough that a large page read by a
+/// `look` is not held once per criterion.
+const MAX_SUMMARY_BYTES: usize = 2048;
+
+/// `text` cut to [`MAX_SUMMARY_BYTES`] at a character boundary.
+fn bounded(text: &str) -> Box<str> {
+    let mut end = text.len().min(MAX_SUMMARY_BYTES);
+    while !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    text[..end].into()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -334,6 +367,25 @@ mod tests {
         g.record_evidence("a", "look", "seen").unwrap();
         g.record_evidence(" a ", "look", "seen again").unwrap();
         assert!(g.check().is_accepted());
+    }
+
+    #[test]
+    fn a_long_summary_is_kept_cut_at_a_character_boundary() {
+        let mut g = gate();
+        g.record_evidence_of_kind("look", &"é".repeat(5000));
+        let kept = g.evidence_for("hero").unwrap();
+        assert!(kept.len() <= super::MAX_SUMMARY_BYTES && kept.chars().all(|c| c == 'é'));
+    }
+
+    #[test]
+    fn evidence_of_a_kind_serves_every_criterion_asking_for_it_and_none_else() {
+        let mut g = gate();
+        assert_eq!(g.record_evidence_of_kind("look", "seen"), 1);
+        assert_eq!(g.record_evidence_of_kind("render", "x"), 0);
+        assert_eq!(g.evidence_for("hero"), Some("seen"));
+        assert_eq!(g.evidence_for("count"), None);
+        g.record_edit();
+        assert!(matches!(g.check(), Verdict::Refused(u) if u.len() == 2));
     }
 
     #[test]
