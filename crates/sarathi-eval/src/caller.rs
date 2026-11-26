@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
-//! Record and replay decorators over a [`ModelCaller`].
+//! Scripted, record and replay decorators over a [`ModelCaller`].
 //!
 //! [`Recording`] wraps a live caller and keeps every call as a cassette [`Entry`] (the request body as sent, the answer
 //! as received). [`Replaying`] answers the same calls from a [`Cassette`] without touching a network: each call must
@@ -228,6 +228,83 @@ impl<C: ModelCaller> ModelCaller for Replaying<C> {
     }
 }
 
+/// Answers the wrapped caller's calls from a list, in order, and keeps every request body it was sent.
+///
+/// The wrapped caller still builds the requests, so a test sees the bytes of the real protocol; only the call itself is
+/// scripted. A run that makes more calls than the script has fails rather than reaching a network.
+#[derive(Debug)]
+pub struct Scripted<C> {
+    inner: C,
+    replies: Mutex<VecDeque<Result<Received, CallFailure>>>,
+    sent: Mutex<Vec<String>>,
+}
+
+impl<C> Scripted<C> {
+    /// Scripts `replies` (an answer or a failure per call) through `inner`'s request building.
+    pub fn new(inner: C, replies: impl IntoIterator<Item = Result<Received, CallFailure>>) -> Self {
+        Scripted {
+            inner,
+            replies: Mutex::new(replies.into_iter().collect()),
+            sent: Mutex::default(),
+        }
+    }
+
+    /// The request bodies sent so far, in call order.
+    #[must_use]
+    pub fn requests(&self) -> Vec<String> {
+        lock(&self.sent).clone()
+    }
+
+    /// Scripted replies not yet used.
+    #[must_use]
+    pub fn remaining(&self) -> usize {
+        lock(&self.replies).len()
+    }
+}
+
+impl<C: ModelCaller> ModelCaller for Scripted<C> {
+    type Prepared = Sent<C::Prepared>;
+
+    fn protocol(&self) -> &str {
+        self.inner.protocol()
+    }
+
+    fn params(&self) -> RawJson {
+        self.inner.params()
+    }
+
+    fn render_tools(&self, tools: &[ToolDef]) -> Result<Option<RawJson>, CallFailure> {
+        self.inner.render_tools(tools)
+    }
+
+    fn result_block(&self, call: &CallId, content: &RawJson, is_error: bool) -> RawJson {
+        self.inner.result_block(call, content, is_error)
+    }
+
+    fn prepare(&self, parts: &RequestParts<'_>) -> Result<(Vec<u8>, Self::Prepared), CallFailure> {
+        let (body, inner) = self.inner.prepare(parts)?;
+        let request = request_text(&body)?;
+        Ok((body, Sent { request, inner }))
+    }
+
+    fn send(&self, sent: Self::Prepared) -> BoxFuture<'_, Result<Received, CallFailure>> {
+        lock(&self.sent).push(sent.request);
+        let next = lock(&self.replies).pop_front();
+        Box::pin(async move {
+            next.unwrap_or_else(|| {
+                Err(CallFailure::new(
+                    ErrorKind::InvalidRequest,
+                    "the script has no more replies: the run made a call the test did not expect",
+                ))
+            })
+        })
+    }
+
+    fn read(&self, body: &RawJson, content: Range<u32>) -> Result<Received, CallFailure> {
+        self.inner.read(body, content)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -329,5 +406,20 @@ mod tests {
         let parsed = crate::cassette::parse(&text).unwrap();
         let rep = Replaying::new(Live(Mutex::new(VecDeque::new())), parsed, answer);
         assert!(rep.send(sent(r#"{"n":1}"#)).await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn a_script_answers_in_order_keeps_requests_and_refuses_a_longer_run() {
+        let s = Scripted::new(
+            Live(Mutex::new(VecDeque::new())),
+            [ok(), failure(Some(529))],
+        );
+        assert!(s.send(sent(r#"{"n":1}"#)).await.is_ok());
+        let f = s.send(sent(r#"{"n":2}"#)).await.unwrap_err();
+        assert_eq!((f.kind, f.status), (ErrorKind::Upstream, Some(529)));
+        assert_eq!(s.remaining(), 0);
+        let f = s.send(sent(r#"{"n":3}"#)).await.unwrap_err();
+        assert!(f.detail.contains("no more replies"), "{}", f.detail);
+        assert_eq!(s.requests(), [r#"{"n":1}"#, r#"{"n":2}"#, r#"{"n":3}"#]);
     }
 }
