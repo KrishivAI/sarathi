@@ -8,6 +8,11 @@
 //! What a cassette keeps of an answer: the assembled message body (a streamed answer is stored as the message the
 //! stream assembled to, not as its frames) and a failure's kind class (by HTTP status when the server answered, a cut
 //! stream otherwise). The cost of a call is not stored: the runner prices a run from its usage.
+//!
+//! A replay is not a byte-for-byte copy of the recorded log: a failure other than an HTTP status comes back as a cut
+//! stream (`Network`), an answer carries no `request_id`, `sse` or `retries`, and calls are matched in the order
+//! `send` is reached (the driver's calls are sequential, so that is the recorded order). The requests themselves match.
+//! Native token counts are not recorded; [`Recording`] reports none, so recording and replay both use the estimate.
 
 use std::collections::VecDeque;
 use std::ops::Range;
@@ -123,11 +128,14 @@ impl<C: ModelCaller> ModelCaller for Recording<C> {
         self.inner.read(body, content)
     }
 
+    /// Always `None`: a native token count is not kept in the cassette, so a recorded run decides near the context
+    /// limit from the estimate, exactly as its replay will. Forwarding it would let the recording compact where the
+    /// replay does not, and the replay would then fail with a request mismatch.
     fn count_tokens(
         &self,
-        parts: &RequestParts<'_>,
+        _parts: &RequestParts<'_>,
     ) -> Option<BoxFuture<'_, Result<u64, CallFailure>>> {
-        self.inner.count_tokens(parts)
+        None
     }
 }
 
@@ -329,5 +337,19 @@ mod tests {
         let parsed = crate::cassette::parse(&text).unwrap();
         let rep = Replaying::new(Live(Mutex::new(VecDeque::new())), parsed, answer);
         assert!(rep.send(sent(r#"{"n":1}"#)).await.is_ok());
+    }
+
+    #[test]
+    fn a_recording_offers_no_native_count_so_it_decides_like_its_replay() {
+        let rec = Recording::new(Live(Mutex::new(VecDeque::new())));
+        let (null, tools) = (RawJson::null(), RawJson::null());
+        let parts = RequestParts {
+            protocol: "anthropic-messages",
+            system: &null,
+            tools: &tools,
+            messages: Vec::new(),
+            params: &null,
+        };
+        assert!(rec.count_tokens(&parts).is_none());
     }
 }
