@@ -23,8 +23,9 @@ mod step;
 pub mod toolbox;
 
 pub use crate::core::{
-    Action, Answer, AskedCall, CUT_SHORT, Core, CoreConfig, Durability, Input, Limits,
-    MAX_STEPS_CEILING, OpenTurn, Phase, Recipe, Record, ResumeAt, Running, TurnEnd, Verdict,
+    Action, Answer, AskedCall, CUT_SHORT, Completion, Core, CoreConfig, Durability, Input, Limits,
+    MAX_COMPLETION_REFUSALS, MAX_STEPS_CEILING, OpenTurn, Phase, Recipe, Record, ResumeAt, Running,
+    TurnEnd, Verdict,
 };
 pub use crate::profile::{
     DONE_TOOL, Effect, ModelProfile, StepProtocol, ToolDef, protocol_text, step_schema,

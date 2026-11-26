@@ -1076,6 +1076,38 @@ fn the_estimate_is_the_last_usage_plus_the_bytes_after_it() {
 }
 
 #[test]
+fn an_answer_holding_a_compaction_block_is_estimated_by_bytes_not_by_its_billed_usage() {
+    let mut s = Script::new();
+    s.user("task 1");
+    let recipe = s.log.next_recipe(raw("{}")).unwrap();
+    s.push(Body::ModelRequest {
+        recipe,
+        sha256: "0".repeat(64),
+        compaction: None,
+    });
+    // Billed usage of a compaction iteration (180,000 in) and the message after it.
+    let body =
+        r#"{"content":[{"type":"compaction","content":"sum"},{"type":"text","text":"done"}]}"#;
+    let from = s.push(Body::ModelResponse {
+        content: 11..u32::try_from(body.len() - 1).unwrap(),
+        body: RawJson::from_string(body.to_owned()).unwrap(),
+        sse: None,
+        request_id: None,
+        usage: Usage {
+            input_tokens: 203_000,
+            output_tokens: 4_500,
+            ..Usage::default()
+        },
+    });
+    s.push(Body::AssistantMessage {
+        from,
+        calls: Vec::new(),
+    });
+    let e = estimate(&s.log);
+    assert!(e > 0 && e < 1_000, "{e}");
+}
+
+#[test]
 fn before_request_counts_near_a_point_compacts_before_the_limit_and_overflows_past_it() {
     // A large answer budget (32% of the window): compaction still comes first.
     let mut p = ContextProfile::new(200_000, 64_000);
@@ -1124,6 +1156,55 @@ fn before_request_counts_near_a_point_compacts_before_the_limit_and_overflows_pa
         before_request(&s.log, &p, None),
         Err(ContextError::NotAtBoundary)
     ));
+}
+
+#[test]
+fn an_overflow_from_the_estimate_alone_is_counted_first_up_to_twice_the_limit() {
+    // Inside a turn with server compaction, so past the limit the only way out is the fallback.
+    let p = ContextProfile::new(200_000, 64_000);
+    assert_eq!(p.limit(), 136_000);
+    let in_turn = |tokens| {
+        let mut s = Script::new();
+        s.sized_turn(1, tokens);
+        s.user("next");
+        s
+    };
+    let s = in_turn(150_000);
+    assert_eq!(
+        before_request(&s.log, &p, None).unwrap(),
+        ContextAction::CountTokens,
+        "over the limit by estimate, within 200% of it: count before dropping turns"
+    );
+    assert_eq!(
+        before_request(&s.log, &p, Some(130_000)).unwrap(),
+        ContextAction::None,
+        "the count says it fits: nothing is dropped"
+    );
+    assert_eq!(
+        before_request(&s.log, &p, Some(150_000)).unwrap(),
+        ContextAction::Overflow,
+        "the count confirms it: overflow, and no second count"
+    );
+    // Past the window but still within 200% of the limit: counted too.
+    let s = in_turn(250_000);
+    assert_eq!(
+        before_request(&s.log, &p, None).unwrap(),
+        ContextAction::CountTokens
+    );
+    // Far past it: the estimate cannot be that far off, overflow at once.
+    let s = in_turn(300_000);
+    assert_eq!(
+        before_request(&s.log, &p, None).unwrap(),
+        ContextAction::Overflow
+    );
+    // Turned off: the old rule.
+    let mut off = p.clone();
+    off.count_before_overflow_percent = 100;
+    let s = in_turn(150_000);
+    assert_eq!(
+        before_request(&s.log, &off, None).unwrap(),
+        ContextAction::Overflow
+    );
 }
 
 #[test]

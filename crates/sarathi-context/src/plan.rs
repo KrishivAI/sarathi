@@ -4,7 +4,7 @@
 use sarathi_log::{Body, Log, Slice};
 use sarathi_protocol::{ErrorKind, Seq};
 
-use crate::compact::{Compactor, compactor_of};
+use crate::compact::{Compactor, block_types, compactor_of};
 use crate::error::ContextError;
 use crate::fallback::{Seed, shrink_to_fit};
 
@@ -19,6 +19,10 @@ pub struct ContextProfile {
     pub compact_at_percent: u8,
     /// An estimate within this percentage of a limit is checked with an exact count first.
     pub count_margin_percent: u8,
+    /// An estimate past the limit but at most this percentage of it is counted before the overflow fallback drops
+    /// turns: the estimate counts bytes after the last answer, which can be far off for code or non-Latin text, and
+    /// dropping turns that would have fit cannot be undone. `100` or less: never counted first.
+    pub count_before_overflow_percent: u16,
     /// Turns before the last one the overflow fallback keeps, at most.
     pub max_kept_turns: usize,
     /// Who summarizes.
@@ -26,14 +30,15 @@ pub struct ContextProfile {
 }
 
 impl ContextProfile {
-    /// A profile for a window, with the defaults: compact at 75%, exact count within 10%, keep up to 4 turns on
-    /// overflow, server compaction.
+    /// A profile for a window, with the defaults: compact at 75%, exact count within 10%, count before an overflow up
+    /// to 200% of the limit, keep up to 4 turns on overflow, server compaction.
     pub fn new(window: u64, max_output: u64) -> Self {
         ContextProfile {
             window,
             max_output,
             compact_at_percent: 75,
             count_margin_percent: 10,
+            count_before_overflow_percent: 200,
             max_kept_turns: 4,
             compactor: Compactor::Server,
         }
@@ -69,7 +74,8 @@ pub enum ContextAction {
 ///
 /// With an accepted answer in the current segment that reports usage: that call's input (uncached, cache reads and
 /// writes) and output tokens, plus 2 tokens per 7 bytes of every slice it did not hold. Otherwise (no answer yet, or
-/// a provider that reports no usage): 2 per 7 bytes of the prefix and every slice.
+/// a provider that reports no usage): 2 per 7 bytes of the prefix and every slice. An answer holding a `compaction`
+/// block is read as one without usage: its usage is billed usage and includes the input that was compacted away.
 pub fn estimate(log: &Log) -> u64 {
     let seg = log.segment();
     let last = log
@@ -86,12 +92,14 @@ pub fn estimate(log: &Log) -> u64 {
         });
     let projection = log.projection();
     let mut bytes = 0usize;
-    let used = last.map_or(0, |(_, _, u)| {
-        u.input_tokens
-            .saturating_add(u.cache_read_input_tokens)
-            .saturating_add(u.cache_creation_input_tokens)
-            .saturating_add(u.output_tokens)
-    });
+    let used = last
+        .filter(|(answer, _, _)| !holds_compaction(log, *answer))
+        .map_or(0, |(_, _, u)| {
+            u.input_tokens
+                .saturating_add(u.cache_read_input_tokens)
+                .saturating_add(u.cache_creation_input_tokens)
+                .saturating_add(u.output_tokens)
+        });
     let base = match last {
         Some((answer, from, _)) if used > 0 => {
             let sent = request_before(log, from)
@@ -120,6 +128,12 @@ pub fn estimate(log: &Log) -> u64 {
     base.saturating_add(bytes.saturating_mul(2).div_ceil(7))
 }
 
+/// Whether the assistant slice at `seq` holds a `compaction` block.
+fn holds_compaction(log: &Log, seq: Seq) -> bool {
+    matches!(log.slice(seq), Ok(Slice::Assistant { content, .. })
+        if block_types(&content).iter().any(|t| t == "compaction"))
+}
+
 /// What to do before the next request, from the [`estimate`] or, after [`ContextAction::CountTokens`], the exact
 /// `counted` size. Ask after each `turn.end` and before each model call.
 ///
@@ -127,6 +141,8 @@ pub fn estimate(log: &Log) -> u64 {
 /// - The last request of the segment was refused as too large: [`ContextAction::Overflow`] (the provider knows best).
 /// - Close to the limit or to the compaction point, with no count: [`ContextAction::CountTokens`].
 /// - Past the window: overflow (not even a compaction call fits).
+/// - Overflow from an estimate at most [`ContextProfile::count_before_overflow_percent`] of the limit, with no count:
+///   [`ContextAction::CountTokens`] first, since the fallback drops turns.
 /// - Compaction allowed and at or past [`ContextProfile::compact_at`]: [`ContextAction::Compact`], also past the
 ///   limit, because a summary keeps more than the fallback does.
 /// - Past [`ContextProfile::limit`]: overflow.
@@ -160,7 +176,7 @@ pub fn before_request(
     if counted.is_none() && (near(profile.limit()) || (may_compact && near(profile.compact_at()))) {
         return Ok(ContextAction::CountTokens);
     }
-    Ok(if tokens > profile.window {
+    let action = if tokens > profile.window {
         ContextAction::Overflow
     } else if may_compact && tokens >= profile.compact_at() {
         ContextAction::Compact(profile.compactor)
@@ -168,7 +184,19 @@ pub fn before_request(
         ContextAction::Overflow
     } else {
         ContextAction::None
-    })
+    };
+    let unsure = || {
+        let band =
+            u128::from(profile.limit()) * u128::from(profile.count_before_overflow_percent) / 100;
+        u128::from(tokens) <= band
+    };
+    Ok(
+        if action == ContextAction::Overflow && counted.is_none() && unsure() {
+            ContextAction::CountTokens
+        } else {
+            action
+        },
+    )
 }
 
 /// The deterministic seed that keeps the most turns (up to [`ContextProfile::max_kept_turns`]) whose new segment's

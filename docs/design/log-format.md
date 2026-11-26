@@ -32,6 +32,11 @@ Kinds: `session.prefix`, `message.user`, `model.request`, `model.response`, `mod
 `tool.ask`, `tool.decision`, `tool.start`, `tool.result`, `segment.seed` (`must_understand`), `segment.start`,
 `turn.end`, `note`.
 
+`model.response.usage` is the call's billed usage, not always the size of the context it left: an Anthropic answer
+whose `usage.iterations` holds `compaction` iterations has them added to its top-level counts (which leave them
+out). Logs written before this rule hold those counts as sent (0 for a compaction-only answer); a reader takes the
+stored value either way.
+
 Invariants checked on every append and on every read (a log read is one a store would accept): dense seqs; an entry
 stays in the current segment unless it is a `segment.start`, which opens the next; references (`from`, `seed`, a
 recipe's `prefix` and `messages`) point back to entries of the right kind; a `segment.start` has a `strategy`
