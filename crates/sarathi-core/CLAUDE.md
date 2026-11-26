@@ -32,7 +32,8 @@ gate.
   spill.
 - `tests/long_run.rs`: 60 turns through a small window with each compactor and a model that answers from what it is
   sent: the prefix check per segment, the seed first after a compaction, a restart after every append of every
-  compaction ending in the same conversation, and a refused request recovered without a model call.
+  compaction, and after a crash inside one (a prefix of its entries written), ending in the same conversation, and a
+  refused request recovered without a model call.
 - `tests/openai.rs`: the OpenAI-style caller through the driver.
 - `tests/toolbox.rs`: a toolbox through the driver: asks, a deny rule on the subject, plan mode, hooks, `Err` as an
   observation.

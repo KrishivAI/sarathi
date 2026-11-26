@@ -5,7 +5,8 @@
 //!
 //! It checks that the run compacts more than once, that every request after a compaction starts with its one seed
 //! slice and holds nothing it replaced, that requests inside a segment only ever append (the prefix check), that a
-//! restart after any append of a compaction ends in the same conversation as the unbroken run, and that a request the
+//! restart after any append of a compaction, or inside one (a prefix of its entries written), ends in the same
+//! conversation as the unbroken run, and that a request the
 //! provider refused as too large is recovered without a model call.
 
 #![expect(clippy::unwrap_used, clippy::panic, reason = "test code")]
@@ -14,7 +15,7 @@ pub mod common;
 
 use std::future::Future;
 use std::ops::Range;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 
 use common::*;
@@ -26,8 +27,8 @@ use sarathi_core::driver::{
 };
 use sarathi_core::{ModelProfile, ToolDef, Verdict};
 use sarathi_log::{
-    Body, Durability, Entry, ForkPoint, Loaded, Log, LogError, LogHeader, LogStore, RequestParts,
-    SessionId, Slice, Strategy,
+    Body, Durability, Entry, ForkPoint, Loaded, Log, LogError, LogHeader, LogStore, MemoryStore,
+    RequestParts, SessionId, Slice, Strategy,
 };
 use sarathi_protocol::{CallId, ErrorKind, Outcome, RawJson, Seq, ToolOutput};
 
@@ -555,6 +556,121 @@ async fn check_long_run(compactor: Compactor) {
     );
 }
 
+/// A store that writes only the first `keep` entries of append `at` and then dies, as a file store can leave a
+/// prefix of a batch after a crash.
+#[derive(Debug, Clone)]
+struct Torn {
+    inner: Arc<MemoryStore>,
+    count: Arc<AtomicU32>,
+    at: u32,
+    keep: usize,
+}
+
+impl LogStore for Torn {
+    fn create(
+        &self,
+        created: u64,
+        forked_from: Option<ForkPoint>,
+    ) -> impl Future<Output = Result<LogHeader, LogError>> + Send {
+        self.inner.create(created, forked_from)
+    }
+
+    async fn append(
+        &self,
+        session: SessionId,
+        expected: Seq,
+        mut entries: Vec<Entry>,
+        durability: Durability,
+    ) -> Result<Seq, LogError> {
+        let n = self.count.fetch_add(1, Ordering::SeqCst);
+        if n < self.at {
+            return self
+                .inner
+                .append(session, expected, entries, durability)
+                .await;
+        }
+        if n == self.at {
+            entries.truncate(self.keep);
+            if !entries.is_empty() {
+                self.inner
+                    .append(session, expected, entries, durability)
+                    .await?;
+            }
+        }
+        Err(LogError::Io(std::io::Error::other("the process is gone")))
+    }
+
+    fn load(&self, session: SessionId) -> impl Future<Output = Result<Loaded, LogError>> + Send {
+        self.inner.load(session)
+    }
+}
+
+/// A crash inside any multi-entry append of a compaction (a prefix of its entries on disk) ends, after a resume, in
+/// the same conversation as the unbroken run.
+async fn check_torn_appends(compactor: Compactor) {
+    let context = profile(compactor);
+    let (store, _, log) = unbroken(&context, None).await;
+    let full = projected(&log);
+    let at_starts = projections_at_segments(&log);
+    let batches = compactions(&log);
+    let appends = store.starts.lock().unwrap().clone();
+    let mut torn = 0;
+    for (first, last) in &batches {
+        let lo = appends.iter().rposition(|s| s <= first).unwrap();
+        let hi = appends.iter().rposition(|s| s <= last).unwrap();
+        for i in lo..=hi {
+            let end = appends.get(i + 1).map_or(log.next_seq().0, |s| s.0);
+            let size = usize::try_from(end - appends[i].0).unwrap();
+            for keep in 1..size {
+                torn += 1;
+                let memory = Arc::new(MemoryStore::default());
+                let store = Torn {
+                    inner: memory.clone(),
+                    count: Arc::default(),
+                    at: u32::try_from(i).unwrap(),
+                    keep,
+                };
+                let model = Long::default();
+                let (mut d, _) = Driver::new(cfg(&context), store, model.clone(), Big, Host(None))
+                    .await
+                    .unwrap();
+                let at = format!("{compactor:?} append {i} keep {keep}/{size}");
+                assert!(!run_from(&mut d, 1, None).await, "{at}: the store stopped");
+                let session = d.session();
+                drop(d);
+                let reopened = Shared {
+                    inner: memory,
+                    ..Shared::default()
+                };
+                let (mut again, _) =
+                    Driver::resume(cfg(&context), reopened, session, model, Big, Host(None))
+                        .await
+                        .unwrap_or_else(|e| panic!("{at}: {e}"));
+                assert!(run_from(&mut again, 1, None).await, "{at}");
+                let resumed = again.log();
+                check_log(resumed);
+                check_requests(resumed);
+                assert_eq!(projected(resumed), full, "{at}");
+                assert_eq!(projections_at_segments(resumed), at_starts, "{at}");
+            }
+        }
+    }
+    assert!(
+        torn > 0,
+        "{compactor:?}: no compaction append holds more than one entry"
+    );
+}
+
+#[tokio::test]
+async fn a_crash_inside_a_compaction_append_with_server_compaction() {
+    check_torn_appends(Compactor::Server).await;
+}
+
+#[tokio::test]
+async fn a_crash_inside_a_compaction_append_with_client_summaries() {
+    check_torn_appends(Compactor::ClientSummary).await;
+}
+
 #[tokio::test]
 async fn sixty_turns_with_server_compaction() {
     check_long_run(Compactor::Server).await;
@@ -609,16 +725,16 @@ async fn a_refused_request_mid_run_is_recovered_without_a_model_call() {
     // The seed's request starts with the server block of the compaction before it.
     assert!(slice_text(&log, kept[0]).contains(r#""type":"compaction""#));
     // The turn ended on the refusal: one model failure, a context overflow. The task is not sent again.
-    let failures: Vec<String> = log
+    // The log records the kind by its name.
+    let failures: Vec<&str> = log
         .entries()
         .iter()
         .filter_map(|e| match &e.body {
-            Body::ModelFailure { error, .. } => Some(error.to_string()),
+            Body::ModelFailure { error, .. } => Some(&**error),
             _ => None,
         })
         .collect();
-    assert_eq!(failures.len(), 1, "{failures:?}");
-    assert!(failures[0].contains("overflow"), "{failures:?}");
+    assert_eq!(failures, [ErrorKind::ContextOverflow.as_str()]);
     let batches = compactions(&log);
     assert!(batches.len() >= 2);
     check_requests(&log);
