@@ -42,6 +42,7 @@ const JUDGING: Judging<'static> = Judging {
     old: "old",
     new: "new",
     strong_slot: "strong",
+    // A stand-in until Q-S6 (the cost tolerance) is answered; it is not the rule.
     cost: CostTolerance::Fraction(0.05),
 };
 
@@ -259,6 +260,8 @@ struct Step {
     calls: Vec<(String, String)>,
     reply: String,
     usage: [u64; 4],
+    /// The answer is malformed under the slot's step protocol (the `malformed_steps` fault), so the core recovers.
+    garbled: bool,
 }
 
 fn seed(brief: &str) -> u64 {
@@ -328,6 +331,7 @@ fn steps(brief: &Brief, harness: &str, run: u32) -> Vec<Step> {
                 calls: vec![c],
                 reply: String::new(),
                 usage,
+                garbled: false,
             }
         })
         .collect();
@@ -339,7 +343,20 @@ fn steps(brief: &Brief, harness: &str, run: u32) -> Vec<Step> {
         } else {
             [9_000 + 2_000 * n, 300, 0, 0]
         },
+        garbled: false,
     });
+    if brief.fault.as_deref() == Some("malformed_steps") {
+        // The first answer is malformed; the core asks again and the run still finishes.
+        out.insert(
+            0,
+            Step {
+                calls: Vec::new(),
+                reply: String::new(),
+                usage: [1_000, 50, 0, 0],
+                garbled: true,
+            },
+        );
+    }
     out
 }
 
@@ -349,7 +366,22 @@ fn answer(step: &Step, n: usize, native: bool) -> Result<Received, CallFailure> 
         r#""usage":{{"input_tokens":{},"output_tokens":{},"cache_read_input_tokens":{},"cache_creation_input_tokens":{}}}"#,
         step.usage[0], step.usage[1], step.usage[2], step.usage[3]
     );
-    let (content, stop) = if native {
+    let (content, stop) = if step.garbled && native {
+        // A `tool_use` whose input is not an object.
+        (
+            r#"{"type":"tool_use","id":"toolu_bad","name":"set_token","input":"not an object"}"#
+                .to_owned(),
+            "tool_use",
+        )
+    } else if step.garbled {
+        (
+            format!(
+                r#"{{"type":"text","text":{}}}"#,
+                RawJson::string("this is not json {").as_str()
+            ),
+            "end_turn",
+        )
+    } else if native {
         let mut blocks: Vec<String> = Vec::new();
         if !step.reply.is_empty() {
             blocks.push(format!(
@@ -613,12 +645,20 @@ fn the_measurement_briefs_run_offline_on_cassettes_and_replay_to_the_same_report
         "a replay reproduces the recorded run's report"
     );
     assert_eq!(recorded_md, replayed_md);
-    // 20 briefs x 3 runs x 3 slots x 2 harnesses, one cassette each.
+    // 20 briefs x 3 runs x 3 slots x 2 harnesses, one `<run>.jsonl` cassette each (arm / brief / run).
     let files = std::fs::read_dir(&dir)
         .unwrap()
-        .map(|a| std::fs::read_dir(a.unwrap().path()).unwrap().count())
-        .sum::<usize>();
-    assert_eq!(files, 6 * 20);
+        .flat_map(|arm| std::fs::read_dir(arm.unwrap().path()).unwrap())
+        .flat_map(|brief| std::fs::read_dir(brief.unwrap().path()).unwrap())
+        .filter(|f| {
+            f.as_ref()
+                .unwrap()
+                .path()
+                .extension()
+                .is_some_and(|e| e == "jsonl")
+        })
+        .count();
+    assert_eq!(files, 6 * 20 * 3);
     if let Ok(out) = std::env::var("SARATHI_A9_OFFLINE_REPORT") {
         std::fs::write(out, &recorded_md).unwrap();
     }
