@@ -227,6 +227,7 @@ pub(super) fn start<C: ModelCaller>(
     core_config.history = projection.messages;
     core_config.next_seq = log.next_seq();
     core_config.allowed_always = allowed_always(log);
+    core_config.completion = config.completion.clone();
 
     let resume = log.resume();
     if !resume.in_turn {

@@ -20,6 +20,7 @@
 //!   last tool result and before the next request.
 
 use std::collections::{HashSet, VecDeque};
+use std::sync::Arc;
 use std::time::Duration;
 
 use sarathi_protocol::{
@@ -98,6 +99,8 @@ pub struct CoreConfig {
     pub next_seq: Seq,
     /// Tools the host allowed for the rest of the session (`allow_always` decisions read back from the log).
     pub allowed_always: Vec<Box<str>>,
+    /// The host's check on a finish, if it has one.
+    pub completion: Option<Arc<dyn Completion>>,
 }
 
 impl CoreConfig {
@@ -111,6 +114,7 @@ impl CoreConfig {
             history: Vec::new(),
             next_seq: Seq(prefix.0 + 1),
             allowed_always: Vec::new(),
+            completion: None,
         }
     }
 }
@@ -159,6 +163,20 @@ impl Answer {
         self
     }
 }
+
+/// A host's check on a finish: the model stopped calling tools and asks to end the turn.
+///
+/// Called by the core (no IO, no waiting) when a turn would end [`Outcome::Finished`]. `Some(text)` refuses: `text`
+/// goes to the model as a message and the turn goes on; at most [`MAX_COMPLETION_REFUSALS`] in a turn, after which
+/// the turn ends [`Outcome::RanOut`]. The check reads state the host's tools keep (see
+/// [`crate::toolbox::ToolboxTools::with_gate`]); it is not in the log, so a resumed session starts it afresh.
+pub trait Completion: std::fmt::Debug + Send + Sync {
+    /// `None` lets the turn finish.
+    fn check(&self) -> Option<String>;
+}
+
+/// How many times in one turn a [`Completion`] may send the model back before the turn ends [`Outcome::RanOut`].
+pub const MAX_COMPLETION_REFUSALS: u32 = 3;
 
 /// What the core is told.
 #[non_exhaustive]
@@ -583,6 +601,8 @@ struct Turn {
     spent_micros: u64,
     queued: Vec<RawJson>,
     shutdown: bool,
+    /// Finishes the [`Completion`] sent back this turn.
+    refused: u32,
     stage: Stage,
 }
 
@@ -600,6 +620,7 @@ pub struct Core {
     allowed_always: HashSet<Box<str>>,
     turn: Option<Turn>,
     broken: bool,
+    completion: Option<Arc<dyn Completion>>,
 }
 
 impl Core {
@@ -621,6 +642,7 @@ impl Core {
             allowed_always: config.allowed_always.into_iter().collect(),
             turn: None,
             broken: false,
+            completion: config.completion,
         }
     }
 
@@ -636,6 +658,7 @@ impl Core {
             spent_micros: 0,
             queued: Vec::new(),
             shutdown: false,
+            refused: 0,
             stage: Stage::Calling { at: core.next_seq },
         });
         out.push(Action::Emit(Event::TurnStarted { turn: open.turn }));
@@ -841,6 +864,7 @@ impl Core {
             spent_micros: 0,
             queued: Vec::new(),
             shutdown: false,
+            refused: 0,
             // Replaced by `next_call` at once.
             stage: Stage::Calling { at },
         });
@@ -1084,9 +1108,51 @@ impl Core {
         if held {
             self.failures = 0;
             self.next_call(out);
+            return;
+        }
+        if let Some(text) = self.completion_refusal() {
+            let Some(t) = self.turn.as_mut() else { return };
+            t.refused += 1;
+            if t.refused > MAX_COMPLETION_REFUSALS || self.at_cap() {
+                self.end(out, Outcome::RanOut, reply);
+                return;
+            }
+            self.failures = 0;
+            self.append(
+                out,
+                vec![Record::UserMessage {
+                    content: RawJson::string(&text),
+                    steer: true,
+                }],
+                Durability::Buffered,
+            );
+            self.next_call(out);
         } else {
             self.end(out, Outcome::Finished, reply);
         }
+    }
+
+    /// The host's refusal of this finish, unless the turn is shutting down.
+    ///
+    /// At the step or spend cap the refusal still stands, but the model cannot be sent back: [`Core::finish`]
+    /// ends the turn [`Outcome::RanOut`] then, so an unverified finish is not reported as done.
+    fn completion_refusal(&self) -> Option<String> {
+        let t = self.turn.as_ref()?;
+        if t.shutdown {
+            return None;
+        }
+        self.completion.as_ref()?.check()
+    }
+
+    /// Whether the turn may not make another model call (step or spend cap).
+    fn at_cap(&self) -> bool {
+        self.turn.as_ref().is_some_and(|t| {
+            t.steps >= self.limits.max_steps
+                || self
+                    .limits
+                    .max_cost_micros
+                    .is_some_and(|cap| t.spent_micros >= cap)
+        })
     }
 
     fn set_tools(&mut self, calls: VecDeque<Call>) {
