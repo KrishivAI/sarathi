@@ -4,7 +4,7 @@
 
 use sarathi_eval::brief::{Brief, Split};
 use sarathi_eval::config::{RunConfig, run_within_caps};
-use sarathi_eval::killline::Outcome;
+use sarathi_eval::killline::{CostSource, Outcome};
 use sarathi_eval::measure::{CostTolerance, Judging, MeasureError, report};
 use sarathi_eval::metrics::{Purpose, TokenUsage};
 use sarathi_eval::report::{to_json, to_markdown};
@@ -183,6 +183,12 @@ fn the_old_cost_spread_is_the_cost_tolerance_when_chosen() {
     assert_eq!(k.outcome, Outcome::Pass, "{:?}", k.notes);
     assert!((r.arms[0].cost_spread - spread).abs() < 1e-9);
     assert!((k.arms[0].tolerance.cost_fraction - spread).abs() < 1e-9);
+    assert_eq!(k.arms[0].tolerance.cost_source, CostSource::OldSpread);
+    assert!(
+        to_markdown(&r).contains("% (old spread)): accept ok, cost ok"),
+        "{}",
+        to_markdown(&r)
+    );
     let fixed = report(&c, &run, Some(&JUDGING), "2026-11-28", 0).unwrap();
     assert_eq!(fixed.kill_line.unwrap().outcome, Outcome::Fail);
     // New: 50% dearer, beyond the spread: fails on cost.
@@ -208,6 +214,62 @@ fn the_old_cost_spread_is_the_cost_tolerance_when_chosen() {
         "{:?}",
         k.notes
     );
+}
+
+/// Every run spends one million uncached input tokens; only repetition 0 is accepted.
+struct FirstOnly;
+impl Harness for FirstOnly {
+    fn run(&self, _b: &Brief, _m: &str, run: u32) -> Result<HarnessOutput, HarnessError> {
+        Ok(HarnessOutput {
+            artifact: if run == 0 { "ok" } else { "no" }.into(),
+            usage: TokenUsage {
+                input_tokens: 1_000_000,
+                ..TokenUsage::default()
+            },
+            ..HarnessOutput::default()
+        })
+    }
+}
+
+#[test]
+fn the_old_cost_spread_without_two_accepted_runs_is_strict_and_noted() {
+    let c = RunConfig::from_json(A9).unwrap();
+    let judging = Judging {
+        cost: CostTolerance::OldSpread,
+        ..JUDGING
+    };
+    let bs = briefs(2);
+    let run = run_within_caps(
+        &c,
+        &bs,
+        &arms(&c, &FirstOnly, &FirstOnly),
+        &Ok_,
+        Purpose::Measure,
+        &[],
+    )
+    .unwrap();
+    let r = report(&c, &run, Some(&judging), "2026-11-28", 0).unwrap();
+    let k = r.kill_line.as_ref().unwrap();
+    // Same cost on both sides: within a strict tolerance, so the outcome does not change; the note says why it is 0.
+    assert_eq!(k.outcome, Outcome::Pass, "{:?}", k.notes);
+    let strong = k.arms.iter().find(|a| a.name == "strong").unwrap();
+    assert_eq!(strong.tolerance.cost_source, CostSource::OldSpreadMissing);
+    assert!(strong.tolerance.cost_fraction.abs() < f64::EPSILON);
+    assert!(
+        k.notes
+            .iter()
+            .any(|n| n.starts_with("arm `strong`: no old brief has two accepted runs")),
+        "{:?}",
+        k.notes
+    );
+    let md = to_markdown(&r);
+    assert!(
+        md.contains("cost 0.0% (old spread missing, strict)"),
+        "{md}"
+    );
+    // A fixed fraction is labelled as such.
+    let fixed = report(&c, &run, Some(&JUDGING), "2026-11-28", 0).unwrap();
+    assert!(to_markdown(&fixed).contains("cost 5.0% (fixed)"));
 }
 
 #[test]
@@ -359,6 +421,13 @@ fn a_judging_rule_that_does_not_fit_is_refused() {
             "NaN cost",
             Judging {
                 cost: CostTolerance::Fraction(f64::NAN),
+                ..JUDGING
+            },
+        ),
+        (
+            "infinite cost",
+            Judging {
+                cost: CostTolerance::Fraction(f64::INFINITY),
                 ..JUDGING
             },
         ),

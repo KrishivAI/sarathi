@@ -14,7 +14,7 @@ unless a caller passes a live provider explicitly.
 - `killline.rs`: the kill-line rule as one pure function; the tolerance is an input.
 - `measure.rs`: a `CappedRun` to its `Report`: stats per arm (slots, then harnesses, in configuration order), the kill
   line over the old/new pair of each slot under a `Judging` rule stated before the run (old, new, strong slot, cost
-  tolerance `CostTolerance::OldSpread` or a fixed `Fraction`; accept tolerance = the old arm's spread), `stopped` passed to both; a slot with no runs is left out with a note.
+  tolerance `CostTolerance::OldSpread` or a fixed `Fraction`; accept tolerance = the old arm's spread), `stopped` passed to both; a slot with no runs is left out with a note. Each `Tolerance` carries its `CostSource` (fixed, old spread, or old spread missing: no old brief has two accepted runs, so 0 and a kill-line note); report.md prints it.
 - `brief.rs`: brief-set JSONL format (header line, then briefs; unknown fields refused; split tuning/measurement).
 - `cassette.rs`: cassette JSONL format, reader and writer, request match naming the first differing field, secret scan.
 - `report.rs`: `report.md` and `report.json`, byte-stable for the same input.

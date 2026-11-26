@@ -14,6 +14,34 @@ pub struct Tolerance {
     pub accept: f64,
     /// How far above the old cost per accepted run the new one may rise, as a fraction (0.05 is 5%).
     pub cost_fraction: f64,
+    /// Where [`Tolerance::cost_fraction`] came from, so the report can say it.
+    #[serde(default)]
+    pub cost_source: CostSource,
+}
+
+/// Where a cost tolerance came from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub enum CostSource {
+    /// A fraction fixed before the run.
+    #[default]
+    Fixed,
+    /// The old arm's own run-to-run cost spread ([`ArmStats::cost_spread`]).
+    OldSpread,
+    /// The old arm's own cost spread was asked for, but no old brief has two accepted runs, so there is no spread and
+    /// the tolerance is 0 (strict). The kill line notes it.
+    OldSpreadMissing,
+}
+
+impl CostSource {
+    /// A short label for the report.
+    #[must_use]
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Fixed => "fixed",
+            Self::OldSpread => "old spread",
+            Self::OldSpreadMissing => "old spread missing, strict",
+        }
+    }
 }
 
 impl Tolerance {
@@ -23,16 +51,25 @@ impl Tolerance {
         Self {
             accept: old.spread,
             cost_fraction,
+            cost_source: CostSource::Fixed,
         }
     }
 
     /// Both tolerances from the old arm's own run-to-run spread: accept rate ([`ArmStats::spread`]) and cost per
-    /// accepted run ([`ArmStats::cost_spread`]), so neither number is picked by hand.
+    /// accepted run ([`ArmStats::cost_spread`]), so neither number is picked by hand. When no old brief has two
+    /// accepted runs there is no cost spread: the cost tolerance is 0 (strict) and marked
+    /// [`CostSource::OldSpreadMissing`].
     #[must_use]
     pub fn from_old_spreads(old: &ArmStats) -> Self {
+        let has_spread = old.briefs.iter().any(|b| b.cost_spread.is_some());
         Self {
             accept: old.spread,
-            cost_fraction: old.cost_spread,
+            cost_fraction: if has_spread { old.cost_spread } else { 0.0 },
+            cost_source: if has_spread {
+                CostSource::OldSpread
+            } else {
+                CostSource::OldSpreadMissing
+            },
         }
     }
 }
@@ -148,6 +185,15 @@ pub fn evaluate(pairs: &[ArmPair<'_>]) -> KillLine {
             ));
         }
     }
+    for p in pairs
+        .iter()
+        .filter(|p| p.tolerance.cost_source == CostSource::OldSpreadMissing)
+    {
+        notes.push(format!(
+            "arm `{}`: no old brief has two accepted runs, so there is no old cost spread; the cost tolerance is 0 (strict)",
+            p.name
+        ));
+    }
     if !arms.iter().any(|a| a.strong) {
         fail = true;
         notes.push("no strong-model arm: the rule cannot be applied".to_owned());
@@ -224,6 +270,7 @@ mod tests {
     const T: Tolerance = Tolerance {
         accept: 0.1,
         cost_fraction: 0.05,
+        cost_source: CostSource::Fixed,
     };
 
     fn pair<'a>(name: &'a str, strong: bool, old: &'a ArmStats, new: &'a ArmStats) -> ArmPair<'a> {
@@ -309,6 +356,7 @@ mod tests {
         let t = Tolerance {
             accept: 1.0,
             cost_fraction: 0.0,
+            cost_source: CostSource::Fixed,
         };
         assert_eq!(
             evaluate(&[pair_t("s", true, &some, &none, t)]).outcome,
@@ -337,7 +385,8 @@ mod tests {
             Tolerance::from_old_spread(&o, 0.05),
             Tolerance {
                 accept: 0.1,
-                cost_fraction: 0.05
+                cost_fraction: 0.05,
+                cost_source: CostSource::Fixed,
             }
         );
     }
@@ -351,10 +400,12 @@ mod tests {
         let tight = Tolerance {
             accept: 0.05,
             cost_fraction: 0.05,
+            cost_source: CostSource::Fixed,
         };
         let wide = Tolerance {
             accept: 0.30,
             cost_fraction: 0.05,
+            cost_source: CostSource::Fixed,
         };
         let kl = evaluate(&[
             pair_t("s", true, &o, &o, tight),
