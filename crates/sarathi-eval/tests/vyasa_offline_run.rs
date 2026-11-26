@@ -5,8 +5,9 @@
 
 use sarathi_eval::brief::{Brief, Split, parse_brief_set, split_of};
 use sarathi_eval::runner::{
-    Acceptance, Arm, Harness, HarnessError, HarnessOutput, Purpose, run_briefs,
+    Acceptance, Arm, Harness, HarnessError, HarnessOutput, Purpose, RunnerError, run_briefs,
 };
+use std::collections::{BTreeMap, BTreeSet};
 
 const SET: &str = include_str!("../../../evals/vyasa/briefs.jsonl");
 
@@ -55,6 +56,18 @@ fn the_twenty_measurement_briefs_run_three_times_each() -> Result<(), String> {
     let recs = run_briefs(&measurement, &arms(&h), &Always, 3, Purpose::Measure)
         .map_err(|e| e.to_string())?;
     assert_eq!(recs.len(), 60);
+    let mut runs: BTreeMap<&str, BTreeSet<u32>> = BTreeMap::new();
+    for r in &recs {
+        runs.entry(r.brief.as_str()).or_default().insert(r.run);
+    }
+    assert_eq!(runs.len(), 20, "every measurement brief has records");
+    let want: BTreeSet<u32> = [0, 1, 2].into();
+    for b in &measurement {
+        assert_eq!(runs.get(b.id.as_str()), Some(&want), "runs of {}", b.id);
+    }
+    let faulty = measurement.iter().filter(|b| b.fault.is_some()).count();
+    assert_eq!(faulty, 1, "adv-04 is a measurement brief");
+    assert_eq!(recs.iter().filter(|r| r.accepted).count(), 60 - faulty);
     Ok(())
 }
 
@@ -63,7 +76,10 @@ fn a_measurement_run_over_the_whole_set_is_refused() -> Result<(), String> {
     let set = parse_brief_set(SET).map_err(|e| e.to_string())?;
     let h = Scripted;
     let r = run_briefs(&set, &arms(&h), &Always, 3, Purpose::Measure);
-    assert!(r.is_err(), "tuning briefs must not enter a measurement run");
+    assert!(
+        matches!(r, Err(RunnerError::TuningInMeasurement(_))),
+        "tuning briefs must not enter a measurement run"
+    );
     Ok(())
 }
 
