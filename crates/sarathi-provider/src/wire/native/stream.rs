@@ -624,6 +624,27 @@ mod tests {
     }
 
     #[test]
+    fn a_streamed_compaction_is_billed_from_the_iterations_of_the_last_delta() {
+        let r = run(&[
+            START,
+            r#"{"type":"content_block_start","index":0,"content_block":{"type":"compaction","content":"s"}}"#,
+            r#"{"type":"content_block_stop","index":0}"#,
+            r#"{"type":"message_delta","delta":{"stop_reason":"compaction","stop_sequence":null},"usage":{"input_tokens":0,"output_tokens":0,"iterations":[{"type":"compaction","input_tokens":144,"output_tokens":276}]}}"#,
+            STOP,
+        ])
+        .unwrap();
+        assert_eq!(r.view.stop_reason.as_deref(), Some("compaction"));
+        assert_eq!(
+            r.view.usage,
+            sarathi_protocol::Usage {
+                input_tokens: 144,
+                output_tokens: 276,
+                ..sarathi_protocol::Usage::default()
+            }
+        );
+    }
+
+    #[test]
     fn a_block_without_deltas_is_kept_as_started() {
         let block = r#"{"type":"thinking", "thinking":"","signature":"sig\/1"}"#;
         let r = run(&[
