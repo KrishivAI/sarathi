@@ -150,6 +150,12 @@ pub struct BriefStats {
     pub pass_all: bool,
     /// Total cost of the runs, micro-dollars.
     pub cost_micro: u64,
+    /// Run-to-run spread of the cost of the accepted runs: their standard deviation over their mean, in population
+    /// form like [`BriefStats::accept_std`]; `None` when fewer than two runs were accepted (one value shows no
+    /// spread, and counting it as 0 would tighten the arm's tolerance). Rejected runs are left out here, although
+    /// [`ArmStats::cost_per_accepted_micro`] counts their cost: this measures how much one accepted run varies.
+    #[serde(default)]
+    pub cost_spread: Option<f64>,
 }
 
 /// The metrics of one arm over all its briefs.
@@ -178,6 +184,11 @@ pub struct ArmStats {
     pub cost_micro: u64,
     /// Cost per accepted run, micro-dollars; `None` when nothing was accepted.
     pub cost_per_accepted_micro: Option<u64>,
+    /// Mean over the briefs with at least two accepted runs of the per-brief [`BriefStats::cost_spread`]: the arm's
+    /// run-to-run cost spread as a fraction (0.1 is 10%), the cost counterpart of [`ArmStats::spread`]; 0 when no
+    /// brief has two accepted runs.
+    #[serde(default)]
+    pub cost_spread: f64,
     /// Mean model calls per run.
     pub steps_mean: f64,
     /// Median wall time, milliseconds.
@@ -199,6 +210,20 @@ pub fn percentile(sorted: &[u64], p: u32) -> u64 {
     let n = sorted.len();
     let rank = (n * p as usize).div_ceil(100).clamp(1, n);
     sorted[rank - 1]
+}
+
+/// Standard deviation (population form) over the mean; `None` for no values, 0 when the mean is 0.
+fn relative_std(xs: &[f64]) -> Option<f64> {
+    if xs.is_empty() {
+        return None;
+    }
+    let n = xs.len() as f64;
+    let mean = xs.iter().sum::<f64>() / n;
+    if mean <= 0.0 {
+        return Some(0.0);
+    }
+    let var = xs.iter().map(|x| (x - mean).powi(2)).sum::<f64>() / n;
+    Some(var.sqrt() / mean)
 }
 
 fn ratio(num: u64, den: u64, empty: f64) -> f64 {
@@ -240,8 +265,13 @@ pub fn arm_stats(
     let mut total_cost = 0u64;
     for (id, rs) in &by_brief {
         let mut cost = 0u64;
+        let mut accepted_costs = Vec::new();
         for r in rs {
-            cost = cost.saturating_add(prices.cost_micro(r)?);
+            let c = prices.cost_micro(r)?;
+            cost = cost.saturating_add(c);
+            if r.accepted {
+                accepted_costs.push(c as f64);
+            }
         }
         total_cost = total_cost.saturating_add(cost);
         let k = u32::try_from(rs.len()).unwrap_or(u32::MAX);
@@ -255,6 +285,11 @@ pub fn arm_stats(
             accept_std: (p * (1.0 - p)).sqrt(),
             pass_all: accepted == k,
             cost_micro: cost,
+            cost_spread: if accepted_costs.len() < 2 {
+                None
+            } else {
+                relative_std(&accepted_costs)
+            },
         });
     }
     let own: Vec<&RunRecord> = runs.iter().filter(|r| r.arm == arm).collect();
@@ -280,6 +315,14 @@ pub fn arm_stats(
         valid_ops_rate: ratio(valid, total_ops, 1.0),
         cost_micro: total_cost,
         cost_per_accepted_micro: (accepted > 0).then(|| total_cost / u64::from(accepted)),
+        cost_spread: {
+            let s: Vec<f64> = briefs.iter().filter_map(|b| b.cost_spread).collect();
+            if s.is_empty() {
+                0.0
+            } else {
+                s.iter().sum::<f64>() / s.len() as f64
+            }
+        },
         steps_mean: ratio(steps, u64::from(n_runs), 0.0),
         wall_p50_ms: percentile(&walls, 50),
         wall_p95_ms: percentile(&walls, 95),
@@ -409,6 +452,58 @@ mod tests {
         assert_eq!(s.cost_per_accepted_micro, None);
         assert_eq!(s.spread, 0.0);
         assert!(!s.briefs[0].pass_all);
+    }
+
+    #[test]
+    fn cost_spread_is_over_accepted_runs_per_brief_then_averaged() {
+        let with_input = |mut r: RunRecord, m: u64| {
+            r.usage = TokenUsage {
+                input_tokens: m * 1_000_000,
+                ..TokenUsage::default()
+            };
+            r
+        };
+        // b1: accepted runs cost $3 and $9 (the rejected $30 run is left out): std 3 over mean 6 = 0.5.
+        // b2: one accepted run: not counted (no spread to see). b3: nothing accepted: not counted.
+        let runs = [
+            with_input(run("b1", "a", 0, true), 1),
+            with_input(run("b1", "a", 1, true), 3),
+            with_input(run("b1", "a", 2, false), 10),
+            with_input(run("b2", "a", 0, true), 1),
+            with_input(run("b3", "a", 0, false), 1),
+        ];
+        let s = arm_stats("a", &runs, &prices()).unwrap();
+        let per: Vec<Option<f64>> = s.briefs.iter().map(|b| b.cost_spread).collect();
+        assert_eq!(per, [Some(0.5), None, None]);
+        assert!((s.cost_spread - 0.5).abs() < 1e-12);
+        let none = arm_stats("a", &[run("b", "a", 0, false)], &prices()).unwrap();
+        assert_eq!(none.cost_spread, 0.0);
+    }
+
+    #[test]
+    fn stats_written_before_the_cost_spread_still_read() {
+        let runs = [run("b", "a", 0, true), run("b", "a", 1, true)];
+        let s = arm_stats("a", &runs, &prices()).unwrap();
+        let mut v = serde_json::to_value(&s).unwrap();
+        v.as_object_mut().unwrap().remove("cost_spread");
+        for b in v["briefs"].as_array_mut().unwrap() {
+            b.as_object_mut().unwrap().remove("cost_spread");
+        }
+        let old: ArmStats = serde_json::from_value(v).unwrap();
+        assert_eq!(old.cost_spread, 0.0);
+        assert_eq!(old.briefs[0].cost_spread, None);
+        assert_eq!(old.accept_rate, s.accept_rate);
+    }
+
+    #[test]
+    fn zero_cost_accepted_runs_have_zero_cost_spread() {
+        let free = |n| RunRecord {
+            usage: TokenUsage::default(),
+            ..run("b", "a", n, true)
+        };
+        let s = arm_stats("a", &[free(0), free(1)], &prices()).unwrap();
+        assert_eq!(s.briefs[0].cost_spread, Some(0.0));
+        assert_eq!(s.cost_spread, 0.0);
     }
 
     #[test]
