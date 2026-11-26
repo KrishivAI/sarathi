@@ -265,7 +265,7 @@ impl Gate {
             c.id.clone(),
             Evidence {
                 at: self.edits,
-                summary: summary.into(),
+                summary: bounded(&summary.into()),
             },
         );
         Ok(())
@@ -538,5 +538,12 @@ mod tests {
         g.record_evidence("hero", "look", "render ok again")
             .unwrap();
         assert!(g.check().is_accepted());
+    }
+
+    #[test]
+    fn a_single_criterion_summary_is_bounded_too() {
+        let mut g = gate();
+        g.record_evidence("hero", "look", "é".repeat(2000)).unwrap();
+        assert!(g.evidence_for("hero").unwrap().len() <= MAX_SUMMARY_BYTES);
     }
 }
