@@ -139,6 +139,24 @@ impl Harness for CostBy {
 }
 
 #[test]
+fn a_strong_slot_stopped_before_its_first_run_fails_the_kill_line() {
+    let mut c = RunConfig::from_json(A9).unwrap();
+    c.slots[0].cap_usd = 1;
+    let h = Spender { misses: &[] };
+    let bs = briefs(2);
+    let all = arms(&c, &h, &h);
+    // An earlier pass already spent the strong slot's cap.
+    let earlier = run_within_caps(&c, &bs, &all[..2], &Ok_, Purpose::Measure, &[]).unwrap();
+    let run = run_within_caps(&c, &bs, &all, &Ok_, Purpose::Measure, &earlier.records).unwrap();
+    let r = report(&c, &run, Some(&JUDGING), "2026-11-28", 0).unwrap();
+    assert_eq!(r.stopped, ["strong"]);
+    assert_eq!((r.arms[0].runs, r.arms[1].runs), (0, 0));
+    let k = r.kill_line.unwrap();
+    assert_eq!(k.outcome, Outcome::Fail, "{:?}", k.notes);
+    assert!(k.arms.iter().all(|a| a.name != "strong"));
+}
+
+#[test]
 fn the_old_cost_spread_is_the_cost_tolerance_when_chosen() {
     let c = RunConfig::from_json(A9).unwrap();
     let judging = Judging {

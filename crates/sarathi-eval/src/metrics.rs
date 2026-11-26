@@ -150,8 +150,10 @@ pub struct BriefStats {
     pub pass_all: bool,
     /// Total cost of the runs, micro-dollars.
     pub cost_micro: u64,
-    /// Run-to-run spread of the cost of the accepted runs: their standard deviation (population form) over their
-    /// mean; `None` when no run was accepted, 0 for one accepted run.
+    /// Run-to-run spread of the cost of the accepted runs: their standard deviation over their mean, in population
+    /// form like [`BriefStats::accept_std`]; `None` when fewer than two runs were accepted (one value shows no
+    /// spread, and counting it as 0 would tighten the arm's tolerance). Rejected runs are left out here, although
+    /// [`ArmStats::cost_per_accepted_micro`] counts their cost: this measures how much one accepted run varies.
     #[serde(default)]
     pub cost_spread: Option<f64>,
 }
@@ -182,9 +184,9 @@ pub struct ArmStats {
     pub cost_micro: u64,
     /// Cost per accepted run, micro-dollars; `None` when nothing was accepted.
     pub cost_per_accepted_micro: Option<u64>,
-    /// Mean over the briefs with an accepted run of the per-brief [`BriefStats::cost_spread`]: the arm's run-to-run
-    /// cost spread as a fraction (0.1 is 10%), the cost counterpart of [`ArmStats::spread`]; 0 when nothing was
-    /// accepted.
+    /// Mean over the briefs with at least two accepted runs of the per-brief [`BriefStats::cost_spread`]: the arm's
+    /// run-to-run cost spread as a fraction (0.1 is 10%), the cost counterpart of [`ArmStats::spread`]; 0 when no
+    /// brief has two accepted runs.
     #[serde(default)]
     pub cost_spread: f64,
     /// Mean model calls per run.
@@ -283,7 +285,11 @@ pub fn arm_stats(
             accept_std: (p * (1.0 - p)).sqrt(),
             pass_all: accepted == k,
             cost_micro: cost,
-            cost_spread: relative_std(&accepted_costs),
+            cost_spread: if accepted_costs.len() < 2 {
+                None
+            } else {
+                relative_std(&accepted_costs)
+            },
         });
     }
     let own: Vec<&RunRecord> = runs.iter().filter(|r| r.arm == arm).collect();
@@ -458,7 +464,7 @@ mod tests {
             r
         };
         // b1: accepted runs cost $3 and $9 (the rejected $30 run is left out): std 3 over mean 6 = 0.5.
-        // b2: one accepted run: 0. b3: nothing accepted: not counted.
+        // b2: one accepted run: not counted (no spread to see). b3: nothing accepted: not counted.
         let runs = [
             with_input(run("b1", "a", 0, true), 1),
             with_input(run("b1", "a", 1, true), 3),
@@ -468,10 +474,36 @@ mod tests {
         ];
         let s = arm_stats("a", &runs, &prices()).unwrap();
         let per: Vec<Option<f64>> = s.briefs.iter().map(|b| b.cost_spread).collect();
-        assert_eq!(per, [Some(0.5), Some(0.0), None]);
-        assert!((s.cost_spread - 0.25).abs() < 1e-12);
+        assert_eq!(per, [Some(0.5), None, None]);
+        assert!((s.cost_spread - 0.5).abs() < 1e-12);
         let none = arm_stats("a", &[run("b", "a", 0, false)], &prices()).unwrap();
         assert_eq!(none.cost_spread, 0.0);
+    }
+
+    #[test]
+    fn stats_written_before_the_cost_spread_still_read() {
+        let runs = [run("b", "a", 0, true), run("b", "a", 1, true)];
+        let s = arm_stats("a", &runs, &prices()).unwrap();
+        let mut v = serde_json::to_value(&s).unwrap();
+        v.as_object_mut().unwrap().remove("cost_spread");
+        for b in v["briefs"].as_array_mut().unwrap() {
+            b.as_object_mut().unwrap().remove("cost_spread");
+        }
+        let old: ArmStats = serde_json::from_value(v).unwrap();
+        assert_eq!(old.cost_spread, 0.0);
+        assert_eq!(old.briefs[0].cost_spread, None);
+        assert_eq!(old.accept_rate, s.accept_rate);
+    }
+
+    #[test]
+    fn zero_cost_accepted_runs_have_zero_cost_spread() {
+        let free = |n| RunRecord {
+            usage: TokenUsage::default(),
+            ..run("b", "a", n, true)
+        };
+        let s = arm_stats("a", &[free(0), free(1)], &prices()).unwrap();
+        assert_eq!(s.briefs[0].cost_spread, Some(0.0));
+        assert_eq!(s.cost_spread, 0.0);
     }
 
     #[test]
