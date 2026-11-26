@@ -35,7 +35,7 @@ gate.
   compaction, and after a crash inside one (a prefix of its entries written), ending in the same conversation, and a
   refused request recovered without a model call.
 - `tests/openai.rs`: the OpenAI-style caller through the driver.
-- `ToolboxTools::with_gate` adds a `plan` tool and feeds a `gate::Gate` (a non-read-only call is an edit; a successful
+- `ToolboxTools::with_gate` (an error if the host has a tool named `plan`) adds a `plan` tool and feeds a `gate::Gate` (a non-read-only call is an edit; a successful
   result of a tool with an evidence kind is evidence for every criterion of that kind); `Completion` (core.rs) lets the
   core send a finish back (steer-style message, at most `MAX_COMPLETION_REFUSALS` a turn, then `RanOut`). Memory only:
   not in the log. `tests/completion.rs`: the gate through the driver.
