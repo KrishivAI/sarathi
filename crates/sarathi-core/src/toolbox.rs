@@ -87,6 +87,11 @@ impl<T: Toolbox> std::fmt::Debug for ToolboxTools<T> {
     }
 }
 
+/// The host already has a tool named [`PLAN_TOOL`], which the gate's own tool would shadow.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[error("the host has a tool named `plan`; the completion gate needs that name for its own tool")]
+pub struct PlanNameTaken;
+
 /// A tool's schema is not one a request can carry.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 #[error("the schema of tool `{tool}` cannot be rendered: {detail}")]
@@ -121,8 +126,13 @@ impl<T: Toolbox> ToolboxTools<T> {
     /// to the driver ([`crate::driver::DriverConfig::with_completion`]): a model that stops without a plan or
     /// without fresh evidence is told what is missing and goes on, up to [`crate::MAX_COMPLETION_REFUSALS`] times a
     /// turn. The gate is memory only: a resumed session starts with no plan and the model is asked for one.
-    #[must_use]
-    pub fn with_gate(mut self, kinds: EvidenceKinds) -> (Self, SharedGate) {
+    ///
+    /// # Errors
+    /// [`PlanNameTaken`] when the host's toolbox already has a tool named [`PLAN_TOOL`].
+    pub fn with_gate(mut self, kinds: EvidenceKinds) -> Result<(Self, SharedGate), PlanNameTaken> {
+        if self.specs.iter().any(|s| s.name == PLAN_TOOL) {
+            return Err(PlanNameTaken);
+        }
         let gate = SharedGate(Arc::new(StdMutex::new(Gate::new(kinds.clone()))));
         let kinds_text = kinds.iter().collect::<Vec<_>>().join(", ");
         self.specs.push(
@@ -150,7 +160,7 @@ impl<T: Toolbox> ToolboxTools<T> {
             .read_only(),
         );
         self.gate = Some(gate.clone());
-        (self, gate)
+        Ok((self, gate))
     }
 
     /// Runs the `plan` tool: `Ok` is the note the model reads, `Err` why the plan was not taken.

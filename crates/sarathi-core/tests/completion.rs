@@ -79,7 +79,8 @@ async fn run_with_steps(
 ) -> (sarathi_log::Log, Scripted, Outcome, SharedGate) {
     let (tools, gate) =
         ToolboxTools::new(page.clone(), Policy::new(Mode::AcceptEdits), Hooks::new())
-            .with_gate(EvidenceKinds::new(["look"]));
+            .with_gate(EvidenceKinds::new(["look"]))
+            .unwrap();
     let defs = tools.defs().unwrap();
     let model = Scripted::new(replies);
     let config = DriverConfig::new(ModelProfile::native(), defs, "You are a test.")
