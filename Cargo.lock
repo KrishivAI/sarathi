@@ -1088,9 +1088,14 @@ dependencies = [
 name = "sarathi-eval"
 version = "0.0.0"
 dependencies = [
+ "sarathi-core",
+ "sarathi-log",
+ "sarathi-protocol",
+ "sarathi-provider",
  "serde",
  "serde_json",
  "thiserror",
+ "tokio",
 ]
 
 [[package]]

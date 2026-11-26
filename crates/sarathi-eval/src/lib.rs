@@ -4,6 +4,7 @@
 //! runner follow once the provider trait lands. Nothing here makes a model call.
 
 pub mod brief;
+pub mod caller;
 pub mod cassette;
 pub mod config;
 pub mod killline;
