@@ -1324,11 +1324,13 @@ mod resume {
         };
         let mut a = h.track(actions);
         let mut sent_back = 0;
-        while turn_end(&a).is_none() {
+        // Bounded: if the cap regresses the test fails here instead of looping forever.
+        for _ in 0..=MAX_COMPLETION_REFUSALS {
             a = h.answer(native(Some("Done."), &[], "end_turn"));
-            if turn_end(&a).is_none() {
-                sent_back += 1;
+            if turn_end(&a).is_some() {
+                break;
             }
+            sent_back += 1;
         }
         assert_eq!(sent_back, MAX_COMPLETION_REFUSALS);
         assert_eq!(turn_end(&a).unwrap().outcome, Outcome::RanOut);
