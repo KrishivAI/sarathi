@@ -96,10 +96,11 @@ pub fn to_markdown(r: &Report) -> String {
             for a in &k.arms {
                 let kind = if a.strong { "strong" } else { "other" };
                 o.push_str(&format!(
-                    "- {} ({kind}, tolerance: accept {:.3}, cost {:.1}%): accept {}, cost {}\n",
+                    "- {} ({kind}, tolerance: accept {:.3}, cost {:.1}% ({})): accept {}, cost {}\n",
                     a.name,
                     a.tolerance.accept,
                     a.tolerance.cost_fraction * 100.0,
+                    a.tolerance.cost_source.label(),
                     if a.accept_ok { "ok" } else { "MISS" },
                     if a.cost_ok { "ok" } else { "MISS" }
                 ));
