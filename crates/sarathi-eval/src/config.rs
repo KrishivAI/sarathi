@@ -5,8 +5,12 @@
 //! The file is JSON with a `version` (this crate writes [`RUN_CONFIG_VERSION`] and reads it and the one before). Money
 //! is whole dollars for caps and micro-dollars per million tokens for prices ([`Price`]), so every sum is exact.
 //!
-//! A cap is checked before each run, from the cost of the runs already recorded, so a slot can overshoot its cap by at
-//! most one run. Provider-side spending limits on the keys are the hard stop; the cap is the measurement's own.
+//! A cap is checked once per group: the runs of one brief and repetition on one slot, one per harness. A group whose
+//! slot is still below its cap (from the cost of the runs already recorded) runs whole; once the slot reaches its cap,
+//! every later group of the slot is skipped. So the harnesses of a stopped slot always ran the same (brief, repetition)
+//! set and their stats stay comparable, and a slot can overshoot its cap by at most one group (one run per harness).
+//! That bound is in runs, not dollars: it bounds money only while one run's cost is bounded, which the provider-side
+//! spending limits on the keys ensure. Those limits are the hard stop; the cap is the measurement's own.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -47,7 +51,8 @@ pub struct RunConfig {
     pub harnesses: Vec<String>,
     /// The slots.
     pub slots: Vec<SlotConfig>,
-    /// The most the whole run may spend, in whole dollars; at least the sum of the slot caps.
+    /// The most the whole run may spend, in whole dollars; at least the sum of the slot caps. Only that sum is
+    /// checked: real spend can pass it by each slot's overshoot (one group per slot, see the module doc).
     pub total_cap_usd: u64,
     /// Free text: where the prices were read and when (recorded, not interpreted).
     #[serde(default)]
@@ -179,8 +184,24 @@ pub fn spent_by_slot(
 pub struct CappedRun {
     /// Every run made, in plan order.
     pub records: Vec<RunRecord>,
-    /// Slots whose cap was reached: their remaining runs were not made, so their arms are incomplete.
+    /// Slots whose cap was reached: their remaining groups were not run, so their arms are incomplete. Pass them on to
+    /// the report ([`CappedRun::stopped_slots`]) and the kill line ([`CappedRun::slot_stopped`]).
     pub stopped: BTreeSet<String>,
+}
+
+impl CappedRun {
+    /// Whether `slot` stopped at its cap: the value for [`crate::killline::ArmPair::stopped`] of the arm pair on
+    /// that slot.
+    #[must_use]
+    pub fn slot_stopped(&self, slot: &str) -> bool {
+        self.stopped.contains(slot)
+    }
+
+    /// The stopped slots, sorted: the value for [`crate::report::Report::stopped`].
+    #[must_use]
+    pub fn stopped_slots(&self) -> Vec<String> {
+        self.stopped.iter().cloned().collect()
+    }
 }
 
 /// A budgeted run refused before it started.
@@ -202,13 +223,15 @@ pub enum CappedRunError {
     },
 }
 
-/// Run `briefs` on `arms` as [`crate::runner::run_briefs`] plans them, one run at a time, skipping every later run of a slot once
-/// that slot's spend (`earlier` records included: an earlier pass of the same measurement, the smoke run) reaches
-/// its cap.
+/// Run `briefs` on `arms` as [`crate::runner::run_briefs`] plans them, one run at a time, skipping every later group
+/// of a slot (its runs of one brief and repetition) once that slot's spend (`earlier` records included: an earlier
+/// pass of the same measurement, the smoke run) reaches its cap. The cap is checked before a group's first run, and a
+/// group that starts runs whole.
 ///
 /// # Errors
-/// [`CappedRunError`] if an arm's slot is not in `config`, its model is not the slot's model, an earlier record cannot
-/// be priced, or the runner refuses the plan ([`check_plan`]).
+/// [`CappedRunError`] if an arm's name is not `<harness>.<slot>` for a configured harness, its slot is not in
+/// `config`, its model is not the slot's model, an earlier record cannot be priced, or the runner refuses the plan
+/// ([`check_plan`]).
 pub fn run_within_caps(
     config: &RunConfig,
     briefs: &[Brief],
@@ -218,6 +241,20 @@ pub fn run_within_caps(
     earlier: &[RunRecord],
 ) -> Result<CappedRun, CappedRunError> {
     for a in arms {
+        if !config
+            .harnesses
+            .iter()
+            .any(|h| a.name == RunConfig::arm_name(h, &a.slot))
+        {
+            return Err(CappedRunError::Arm {
+                arm: a.name.clone(),
+                why: format!(
+                    "not `<harness>.{}` for a configured harness ({})",
+                    a.slot,
+                    config.harnesses.join(", ")
+                ),
+            });
+        }
         let Some(s) = config.slot(&a.slot) else {
             return Err(CappedRunError::Arm {
                 arm: a.name.clone(),
@@ -242,13 +279,21 @@ pub fn run_within_caps(
         records: Vec::new(),
         stopped: BTreeSet::new(),
     };
+    // Whether each (repetition, brief, slot) group runs, decided at its first run in plan order.
+    let mut groups: BTreeMap<(u32, usize, &str), bool> = BTreeMap::new();
     for p in plan(briefs, arms.len(), config.runs) {
         let arm = &arms[p.arm];
-        let cap = config
-            .slot(&arm.slot)
-            .map_or(0, |s| s.cap_usd.saturating_mul(1_000_000));
         let so_far = spent.get(&arm.slot).copied().unwrap_or(0);
-        if so_far >= cap {
+        let runs = *groups
+            .entry((p.run, p.brief, &arm.slot))
+            .or_insert_with(|| {
+                // Every arm's slot was checked to be configured above, so the `0` (stop at once) is never used.
+                let cap = config
+                    .slot(&arm.slot)
+                    .map_or(0, |s| s.cap_usd.saturating_mul(1_000_000));
+                so_far < cap
+            });
+        if !runs {
             out.stopped.insert(arm.slot.clone());
             continue;
         }

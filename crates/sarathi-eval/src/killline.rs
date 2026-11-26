@@ -41,6 +41,9 @@ pub struct ArmPair<'a> {
     /// This arm's tolerance: the old harness's own spread differs per arm, so one tolerance for all arms would
     /// misjudge the arms whose spread is larger or smaller.
     pub tolerance: Tolerance,
+    /// The slot stopped at its spend cap ([`crate::config::CappedRun::stopped`]), so both arms are incomplete. A
+    /// stopped strong arm fails the rule (it cannot decide on part of the measurement); on another arm it is a note.
+    pub stopped: bool,
 }
 
 /// How one arm fared.
@@ -119,6 +122,20 @@ pub fn evaluate(pairs: &[ArmPair<'_>]) -> KillLine {
                     p.name
                 ));
             }
+        }
+    }
+    for p in pairs.iter().filter(|p| p.stopped) {
+        if p.strong {
+            fail = true;
+            notes.push(format!(
+                "strong arm `{}`: stopped at its spend cap, so the measurement is incomplete and cannot decide",
+                p.name
+            ));
+        } else {
+            notes.push(format!(
+                "finding, arm `{}`: stopped at its spend cap; judged on the runs made before the stop",
+                p.name
+            ));
         }
     }
     if !arms.iter().any(|a| a.strong) {
@@ -215,6 +232,7 @@ mod tests {
             old,
             new,
             tolerance,
+            stopped: false,
         }
     }
 
@@ -346,6 +364,29 @@ mod tests {
         let o = arm(0.8, Some(100));
         let n = arm(0.8, Some(105));
         assert_eq!(evaluate(&[pair("s", true, &o, &n)]).outcome, Outcome::Pass);
+    }
+
+    #[test]
+    fn a_stopped_strong_arm_fails_and_a_stopped_other_arm_is_a_finding() {
+        let o = arm(0.8, Some(100));
+        let mut strong = pair("s", true, &o, &o);
+        strong.stopped = true;
+        let kl = evaluate(&[strong]);
+        assert_eq!(kl.outcome, Outcome::Fail);
+        assert!(
+            kl.notes
+                .iter()
+                .any(|n| n.contains("stopped at its spend cap"))
+        );
+        let mut other = pair("cheap", false, &o, &o);
+        other.stopped = true;
+        let kl = evaluate(&[pair("s", true, &o, &o), other]);
+        assert_eq!(kl.outcome, Outcome::Pass);
+        assert!(
+            kl.notes
+                .iter()
+                .any(|n| n.starts_with("finding, arm `cheap`: stopped"))
+        );
     }
 
     #[test]

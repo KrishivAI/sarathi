@@ -73,6 +73,7 @@ fn once() -> Result<(String, String), String> {
         prices,
         kill_line: None,
         deviations: 0,
+        stopped: vec![],
     };
     Ok((
         to_json(&report).map_err(|e| e.to_string())?,
