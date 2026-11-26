@@ -14,4 +14,4 @@ unless a caller passes a live provider explicitly.
 - `report.rs`: `report.md` and `report.json`, byte-stable for the same input.
 - `runner.rs`: `Harness` and `Acceptance` traits, the run plan (arm order alternates by brief), the split guard (tuning vs measurement), `run_briefs` (a failed run is a record; `check_plan` and `run_one` are its two halves), the run directory.
 
-Not yet built: the scripted provider and the record and replay decorators (they need the provider trait).
+- `caller.rs`: `Recording<C>` and `Replaying<C>`, decorators over a core `ModelCaller`: record every call as a cassette entry; replay in order with a byte-for-byte request match (a mismatch names the field). Streams are kept as the assembled message; a failure keeps its status class.
