@@ -23,10 +23,15 @@ reads N and N-1. Version 1 is the first of each, so no N-1 exists yet; the rules
 - N-1 rule as above. Replay compares the request's JSON and its bytes; equal JSON with different bytes is a mismatch.
 - Recording refuses to write text that looks like a secret.
 
-## Run record (`<root>/<date>/<arm>/<brief>/<run>.json`)
+## Run record (`<root>/<date>/<purpose>/<arm>/<brief>/<run>.json`)
 
-- One pretty-printed JSON object per run: `brief`, `arm` (unique name, e.g. `new-strong`), `slot` (the slot the arm
+- One pretty-printed JSON object per run: `brief`, `arm` (unique name, e.g. `new.strong`), `slot` (the slot the arm
   filled), `model` (the concrete id; the price key), `run`, `accepted`, `valid_ops`, `total_ops`, `usage`, `steps`,
   `wall_ms`, `error`.
 - **Versioned from the start of this change:** `version` (1, `RUN_RECORD_VERSION`) and `purpose` (`tune` | `measure`) are required fields; the path is `<root>/<date>/<purpose>/<arm>/<brief>/<run>.json`. Unknown fields are still ignored, so the next field change bumps `version`. `slot` is `#[serde(default)]` (empty when absent). A tuning pass and the measurement never share a directory, `arm_stats` refuses a mix of purposes, and the kill line fails on stats that are not from a measurement pass.
 - Components of the path (`date`, `arm`, `brief`) are checked to be plain names before anything is written.
+- A pass that spends money saves each record as its run ends (`save_record`): written and synced to
+  `<run>.json.tmp`, then renamed, and never over an existing record. One writer per run directory.
+- `read_records` reads a whole pass back (version N and N-1) and skips nothing, because a skipped record is spend that
+  goes uncounted: a file that is not a whole record (a left-over `.tmp` included), an unknown version or a record that
+  is not at its own path is an error naming the file.
