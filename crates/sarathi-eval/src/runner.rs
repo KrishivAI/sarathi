@@ -3,6 +3,7 @@
 //! the run directory. A run that fails is recorded as a failed run, never dropped. Nothing here knows which provider a
 //! harness uses; a harness decides that, so the same runner measures a recorded run and a live one.
 
+use std::io::Write as _;
 use std::path::{Path, PathBuf};
 
 use serde::Serialize;
@@ -320,6 +321,95 @@ pub fn write_records(root: &Path, date: &str, records: &[RunRecord]) -> Result<(
 #[derive(Serialize)]
 #[serde(transparent)]
 struct Wrapper<'a>(&'a RunRecord);
+
+/// Save one record as its run ends: at [`record_path`], never over an existing file (a record is spend that was made),
+/// and whole or not at all (written and synced to `<run>.json.tmp`, then renamed). One writer per run directory.
+///
+/// # Errors
+/// [`RunnerError::Invalid`] for an id that would leave the directory; [`RunnerError::Io`] if the record is already
+/// there or on a failed create, write or rename.
+pub fn save_record(root: &Path, date: &str, r: &RunRecord) -> Result<(), RunnerError> {
+    check_component("date", date)?;
+    check_component("arm name", &r.arm)?;
+    check_component("brief id", &r.brief)?;
+    let path = record_path(root, date, r);
+    let io = |e: std::io::Error| RunnerError::Io(format!("{}: {e}", path.display()));
+    if path.try_exists().map_err(io)? {
+        return Err(RunnerError::Io(format!(
+            "{}: a record is already there",
+            path.display()
+        )));
+    }
+    let mut s =
+        serde_json::to_string_pretty(&Wrapper(r)).map_err(|e| RunnerError::Io(e.to_string()))?;
+    s.push('\n');
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir).map_err(io)?;
+    }
+    let tmp = path.with_extension("json.tmp");
+    let mut f = std::fs::File::create_new(&tmp).map_err(io)?;
+    f.write_all(s.as_bytes()).map_err(io)?;
+    f.sync_all().map_err(io)?;
+    std::fs::rename(&tmp, &path).map_err(io)
+}
+
+/// Every record of the `purpose` pass under `<root>/<date>`, sorted by arm, brief and run; none if the directory is
+/// not there. Anything else below it is an error and is never skipped, since a skipped record is spend that goes
+/// uncounted: a file that is not a whole record (such as a `.tmp` a stopped save left), a version this crate does not
+/// read, or a record that is not at its own [`record_path`].
+///
+/// # Errors
+/// [`RunnerError::Invalid`] for a date that would leave the directory; [`RunnerError::Io`] naming the first path that
+/// cannot be read as above.
+pub fn read_records(
+    root: &Path,
+    date: &str,
+    purpose: Purpose,
+) -> Result<Vec<RunRecord>, RunnerError> {
+    check_component("date", date)?;
+    let dir = root.join(date).join(purpose.dir());
+    let mut out = Vec::new();
+    match dir.try_exists() {
+        Ok(false) => return Ok(out),
+        Ok(true) => {}
+        Err(e) => return Err(RunnerError::Io(format!("{}: {e}", dir.display()))),
+    }
+    for arm in entries(&dir)? {
+        for brief in entries(&arm)? {
+            for path in entries(&brief)? {
+                let bad = |why: String| RunnerError::Io(format!("{}: {why}", path.display()));
+                let text = std::fs::read_to_string(&path).map_err(|e| bad(e.to_string()))?;
+                let r: RunRecord = serde_json::from_str(&text).map_err(|e| bad(e.to_string()))?;
+                // This version and the one before; there is no version 0.
+                let oldest = RUN_RECORD_VERSION.saturating_sub(1).max(1);
+                if !(oldest..=RUN_RECORD_VERSION).contains(&r.version) {
+                    return Err(bad(format!(
+                        "record version {}, this crate reads {oldest} to {RUN_RECORD_VERSION}",
+                        r.version
+                    )));
+                }
+                if record_path(root, date, &r) != path {
+                    return Err(bad("the record is not in its own place".into()));
+                }
+                out.push(r);
+            }
+        }
+    }
+    out.sort_by(|a, b| (&a.arm, &a.brief, a.run).cmp(&(&b.arm, &b.brief, b.run)));
+    Ok(out)
+}
+
+/// The paths in `dir`, sorted, so the first error is the same on every machine.
+fn entries(dir: &Path) -> Result<Vec<PathBuf>, RunnerError> {
+    let io = |e: std::io::Error| RunnerError::Io(format!("{}: {e}", dir.display()));
+    let mut paths = std::fs::read_dir(dir)
+        .map_err(io)?
+        .map(|e| e.map(|e| e.path()))
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(io)?;
+    paths.sort();
+    Ok(paths)
+}
 
 #[cfg(test)]
 mod tests {

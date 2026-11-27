@@ -18,7 +18,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::brief::Brief;
 use crate::metrics::{MetricsError, Price, PriceTable, Purpose, RunRecord};
-use crate::runner::{Acceptance, Arm, RunnerError, check_plan, plan, run_one};
+use crate::runner::{Acceptance, Arm, Planned, RunnerError, check_plan, plan, run_one};
 
 /// The run-configuration format version this crate writes.
 pub const RUN_CONFIG_VERSION: u32 = 1;
@@ -204,7 +204,16 @@ impl CappedRun {
     }
 }
 
-/// A budgeted run refused before it started.
+/// What a budgeted pass has on disk and where its new records go ([`run_within_caps_journaled`]).
+pub struct Journal<'a> {
+    /// The records of this pass already made, by a process that stopped before the end
+    /// ([`crate::runner::read_records`]); empty for a new pass. Their runs are not made again.
+    pub done: &'a [RunRecord],
+    /// Called with each new record before the next run starts ([`crate::runner::save_record`]).
+    pub save: &'a mut dyn FnMut(&RunRecord) -> Result<(), RunnerError>,
+}
+
+/// A budgeted run refused before it started, or stopped because a record could not be saved.
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
 pub enum CappedRunError {
     /// The runner refused the plan.
@@ -221,6 +230,22 @@ pub enum CappedRunError {
         /// What does not match.
         why: String,
     },
+    /// A record handed in as done is not a run of this pass.
+    #[error("done record (arm `{arm}`, brief `{brief}`, run {run}): {why}")]
+    Done {
+        /// The record's arm.
+        arm: String,
+        /// The record's brief.
+        brief: String,
+        /// The record's repetition.
+        run: u32,
+        /// What does not match.
+        why: &'static str,
+    },
+    /// A new record could not be saved, so no further run was made. The run it was for was made (and billed) and is
+    /// not on disk.
+    #[error("a record could not be saved, so no further run was made: {0}")]
+    Save(#[source] RunnerError),
 }
 
 /// Run `briefs` on `arms` as [`crate::runner::run_briefs`] plans them, one run at a time, skipping every later group
@@ -239,6 +264,33 @@ pub fn run_within_caps(
     acceptance: &dyn Acceptance,
     purpose: Purpose,
     earlier: &[RunRecord],
+) -> Result<CappedRun, CappedRunError> {
+    let journal = Journal {
+        done: &[],
+        save: &mut |_| Ok(()),
+    };
+    run_within_caps_journaled(config, briefs, arms, acceptance, purpose, earlier, journal)
+}
+
+/// [`run_within_caps`] for a pass that must survive a stop, such as one that spends money: each record is handed to
+/// [`Journal::save`] as its run ends, and a pass started again with the saved records as [`Journal::done`] makes only
+/// the missing runs. A done run counts towards its slot's cap, a group with a done run is finished whatever the spend,
+/// and the result is that of a pass that never stopped. `earlier` holds other passes only: a record in both would be
+/// counted twice. A run cut off before its record was saved is made again and its first spend is in no record, which
+/// the provider-side limits on the keys bound.
+///
+/// # Errors
+/// As [`run_within_caps`]; [`CappedRunError::Done`] (before any run) if a done record is not a run of this pass (its
+/// purpose, arm, slot, model, brief or repetition) or is there twice; [`CappedRunError::Save`] at the first record
+/// that cannot be saved.
+pub fn run_within_caps_journaled(
+    config: &RunConfig,
+    briefs: &[Brief],
+    arms: &[Arm<'_>],
+    acceptance: &dyn Acceptance,
+    purpose: Purpose,
+    earlier: &[RunRecord],
+    journal: Journal<'_>,
 ) -> Result<CappedRun, CappedRunError> {
     for a in arms {
         if !config
@@ -275,13 +327,35 @@ pub fn run_within_caps(
     let mut spent = spent_by_slot(earlier, &prices)?;
     // The runner's own checks and plan order, then the runs one by one.
     check_plan(briefs, arms, config.runs, purpose)?;
+    let done = done_runs(journal.done, briefs, arms, config.runs, purpose)?;
+    for (slot, cost) in spent_by_slot(journal.done, &prices)? {
+        let s = spent.entry(slot).or_default();
+        *s = s.saturating_add(cost);
+    }
     let mut out = CappedRun {
         records: Vec::new(),
         stopped: BTreeSet::new(),
     };
-    // Whether each (repetition, brief, slot) group runs, decided at its first run in plan order.
-    let mut groups: BTreeMap<(u32, usize, &str), bool> = BTreeMap::new();
-    for p in plan(briefs, arms.len(), config.runs) {
+    let order = plan(briefs, arms.len(), config.runs);
+    let key = |p: &Planned| {
+        (
+            arms[p.arm].name.as_str(),
+            briefs[p.brief].id.as_str(),
+            p.run,
+        )
+    };
+    // Whether each (repetition, brief, slot) group runs, decided at its first new run in plan order; a group with a
+    // done run has started, so it runs.
+    let mut groups: BTreeMap<(u32, usize, &str), bool> = order
+        .iter()
+        .filter(|p| done.contains_key(&key(p)))
+        .map(|p| ((p.run, p.brief, arms[p.arm].slot.as_str()), true))
+        .collect();
+    for p in &order {
+        if let Some(&r) = done.get(&key(p)) {
+            out.records.push(r.clone());
+            continue;
+        }
         let arm = &arms[p.arm];
         let so_far = spent.get(&arm.slot).copied().unwrap_or(0);
         let runs = *groups
@@ -298,9 +372,51 @@ pub fn run_within_caps(
             continue;
         }
         let rec = run_one(&briefs[p.brief], arm, acceptance, p.run, purpose);
+        (journal.save)(&rec).map_err(CappedRunError::Save)?;
         let c = prices.cost_micro(&rec)?;
         spent.insert(arm.slot.clone(), so_far.saturating_add(c));
         out.records.push(rec);
+    }
+    Ok(out)
+}
+
+/// The `done` records by (arm, brief, repetition), each checked to be a run of this pass and there once.
+fn done_runs<'r>(
+    done: &'r [RunRecord],
+    briefs: &[Brief],
+    arms: &[Arm<'_>],
+    runs: u32,
+    purpose: Purpose,
+) -> Result<BTreeMap<(&'r str, &'r str, u32), &'r RunRecord>, CappedRunError> {
+    let mut out = BTreeMap::new();
+    for r in done {
+        let refuse = |why| CappedRunError::Done {
+            arm: r.arm.clone(),
+            brief: r.brief.clone(),
+            run: r.run,
+            why,
+        };
+        if r.purpose != purpose {
+            return Err(refuse("made for another purpose"));
+        }
+        let Some(arm) = arms.iter().find(|a| a.name == r.arm) else {
+            return Err(refuse("no such arm in this pass"));
+        };
+        if r.slot != arm.slot || r.model != arm.model {
+            return Err(refuse("made on another slot or model than the arm's"));
+        }
+        if !briefs.iter().any(|b| b.id == r.brief) {
+            return Err(refuse("no such brief in this pass"));
+        }
+        if r.run >= runs {
+            return Err(refuse("a repetition this pass does not make"));
+        }
+        if out
+            .insert((r.arm.as_str(), r.brief.as_str(), r.run), r)
+            .is_some()
+        {
+            return Err(refuse("there twice"));
+        }
     }
     Ok(out)
 }
