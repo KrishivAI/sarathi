@@ -40,6 +40,10 @@ impl Harness for Spender {
 }
 struct Ok_;
 impl Acceptance for Ok_ {
+    fn handles(&self, _: &str) -> bool {
+        true
+    }
+
     fn accepts(&self, _b: &Brief, o: &HarnessOutput) -> bool {
         o.artifact == "ok"
     }

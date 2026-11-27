@@ -40,6 +40,10 @@ impl Harness for Spender<'_> {
 }
 struct Always;
 impl Acceptance for Always {
+    fn handles(&self, _: &str) -> bool {
+        true
+    }
+
     fn accepts(&self, _b: &Brief, _o: &HarnessOutput) -> bool {
         true
     }

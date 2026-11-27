@@ -127,6 +127,10 @@ impl Harness for Spender {
 }
 struct Always;
 impl Acceptance for Always {
+    fn handles(&self, _: &str) -> bool {
+        true
+    }
+
     fn accepts(&self, _b: &Brief, _o: &HarnessOutput) -> bool {
         true
     }

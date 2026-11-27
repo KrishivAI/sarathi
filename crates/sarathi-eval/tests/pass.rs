@@ -15,6 +15,7 @@ use sarathi_eval::report::Report;
 use sarathi_eval::runner::{
     Acceptance, Harness, HarnessError, HarnessOutput, read_records, record_path,
 };
+use sarathi_eval::structural::Structural;
 
 const A9: &str = include_str!("../../../evals/vyasa/a9-run.json");
 const SET: &str = include_str!("../../../evals/vyasa/briefs.jsonl");
@@ -63,6 +64,10 @@ impl Harness for Spender {
 }
 struct Always;
 impl Acceptance for Always {
+    fn handles(&self, _: &str) -> bool {
+        true
+    }
+
     fn accepts(&self, _: &Brief, _: &HarnessOutput) -> bool {
         true
     }
@@ -85,7 +90,8 @@ impl Fixture {
     }
 
     fn dry<'a>(&'a self, kind: PassKind<'a>, date: &'a str) -> Result<Summary, PassError> {
-        Pass::prepare(&self.config, &self.set, kind, &self.root, date).map(|p| p.summary().clone())
+        Pass::prepare(&self.config, &self.set, kind, &Always, &self.root, date)
+            .map(|p| p.summary().clone())
     }
 
     fn run<'a>(
@@ -94,11 +100,8 @@ impl Fixture {
         date: &'a str,
         h: &Spender,
     ) -> Result<(CappedRun, Report), PassError> {
-        Pass::prepare(&self.config, &self.set, kind, &self.root, date)?.run(
-            |_: &str, _: &SlotConfig| h as &dyn Harness,
-            &Always,
-            0,
-        )
+        Pass::prepare(&self.config, &self.set, kind, &Always, &self.root, date)?
+            .run(|_: &str, _: &SlotConfig| h as &dyn Harness, 0)
     }
 }
 impl Drop for Fixture {
@@ -251,9 +254,9 @@ fn failed_smoke_runs_do_not_price_the_measurement() {
         }
     }
     let f = Fixture::new("down").unwrap();
-    Pass::prepare(&f.config, &f.set, SMOKE, &f.root, FRI)
+    Pass::prepare(&f.config, &f.set, SMOKE, &Always, &f.root, FRI)
         .unwrap()
-        .run(|_: &str, _: &SlotConfig| &Down as &dyn Harness, &Always, 0)
+        .run(|_: &str, _: &SlotConfig| &Down as &dyn Harness, 0)
         .unwrap();
     assert_eq!(f.dry(MEASURE, SAT).unwrap().slots[0].projected_micro, None);
     let h = Spender::new(1_000);
@@ -362,10 +365,10 @@ fn one_pass_at_a_time_holds_the_root() {
 fn records_added_after_the_dry_run_are_seen_under_the_lock() {
     let f = Fixture::new("stale").unwrap();
     let h = Spender::new(1_000);
-    let stale = Pass::prepare(&f.config, &f.set, SMOKE, &f.root, FRI).unwrap();
+    let stale = Pass::prepare(&f.config, &f.set, SMOKE, &Always, &f.root, FRI).unwrap();
     f.run(SMOKE, FRI, &h).unwrap();
     stale
-        .run(|_: &str, _: &SlotConfig| &h as &dyn Harness, &Always, 0)
+        .run(|_: &str, _: &SlotConfig| &h as &dyn Harness, 0)
         .unwrap();
     assert_eq!(h.calls.get(), 12);
 }
@@ -418,4 +421,24 @@ fn a_request_that_does_not_fit_is_refused_before_any_run() {
     assert!(matches!(f.dry(SMOKE, "../x"), Err(PassError::Runner(_))));
     assert!(f.run(SMOKE, "../x", &h).is_err());
     assert_eq!(h.calls.get(), 0);
+}
+
+#[test]
+fn a_brief_whose_acceptance_check_the_pass_does_not_make_is_refused_before_any_run() {
+    let mut f = Fixture::new("check").unwrap();
+    let check = Structural::default();
+    let prepare = |f: &Fixture| {
+        Pass::prepare(&f.config, &f.set, SMOKE, &check, &f.root, FRI).map(|p| p.summary().clone())
+    };
+    // The committed set names only the structural check.
+    prepare(&f).unwrap();
+    // A brief outside this pass counts too: a later pass must not be the first to find it.
+    let b = f.set.iter_mut().find(|b| b.id == "plain-05").unwrap();
+    b.acceptance = "structual".into();
+    let e = prepare(&f).unwrap_err();
+    assert!(
+        matches!(&e, PassError::Invalid(m) if m.contains("plain-05")),
+        "{e}"
+    );
+    assert!(!f.root.exists());
 }
