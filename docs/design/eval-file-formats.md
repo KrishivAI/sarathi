@@ -35,8 +35,9 @@ reads N and N-1. Version 1 is the first of each, so no N-1 exists yet; the rules
 - `read_records` reads a whole pass back (version N and N-1) and skips nothing, because a skipped record is spend that
   goes uncounted: a file that is not a whole record (a left-over `.tmp` included), an unknown version or a record that
   is not at its own path is an error naming the file.
-- The directory is synced after the rename. To recover a left-over `<run>.json.tmp`: if it holds a whole record,
-  rename it to `<run>.json`; if it is cut off, delete it.
+- The directory is synced after the rename. To recover a left-over `<run>.json.tmp`, first make sure no pass is running
+  (`<root>/lock` is free: a save in progress has a `.tmp` too). Then, if it holds a whole record, rename it to
+  `<run>.json`; if it is cut off, delete it.
 
 ## Pass directory (`<root>/<pass>/<date>/`)
 

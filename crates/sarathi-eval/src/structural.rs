@@ -15,6 +15,9 @@ use crate::runner::{Acceptance, HarnessOutput};
 /// The [`Proposal`] format version this crate writes.
 pub const PROPOSAL_VERSION: u32 = 1;
 
+/// The name a brief's `acceptance` field gives the structural check.
+pub const STRUCTURAL: &str = "structural";
+
 /// The WCAG AA contrast ratio for normal-size text.
 pub const AA_CONTRAST: f64 = 4.5;
 
@@ -146,6 +149,10 @@ impl Structural {
 }
 
 impl Acceptance for Structural {
+    fn handles(&self, check: &str) -> bool {
+        check == STRUCTURAL
+    }
+
     fn accepts(&self, _brief: &Brief, out: &HarnessOutput) -> bool {
         self.check(out).is_ok()
     }
