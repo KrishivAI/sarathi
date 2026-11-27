@@ -129,7 +129,8 @@ pub fn report(
     })
 }
 
-fn check(config: &RunConfig, j: &Judging<'_>) -> Result<(), MeasureError> {
+/// Whether `j` fits `config`.
+pub(crate) fn check(config: &RunConfig, j: &Judging<'_>) -> Result<(), MeasureError> {
     let bad = |m: String| Err(MeasureError::Judging(m));
     for (what, h) in [("old", j.old), ("new", j.new)] {
         if !config.harnesses.iter().any(|c| c == h) {
