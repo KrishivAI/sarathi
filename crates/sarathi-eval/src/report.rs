@@ -86,7 +86,7 @@ pub fn to_markdown(r: &Report) -> String {
     }
     o.push('\n');
     match &r.kill_line {
-        None => o.push_str("Kill line: not evaluated (one harness measured).\n"),
+        None => o.push_str("Kill line: not evaluated (this run has no judging rule: one harness, a tuning pass or a smoke run).\n"),
         Some(k) => {
             let word = match k.outcome {
                 Outcome::Pass => "PASS",
