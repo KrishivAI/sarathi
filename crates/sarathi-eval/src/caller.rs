@@ -319,11 +319,15 @@ impl<C: ModelCaller> ModelCaller for Scripted<C> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use sarathi_core::anthropic::answer;
+    use sarathi_core::anthropic::{AnthropicCaller, answer};
+    use sarathi_log::Slice;
+    use sarathi_protocol::Seq;
+    use sarathi_provider::{Chain, Client, Slot, Target};
 
     const ANSWER: &str = r#"{"id":"m1","type":"message","role":"assistant","model":"m","content":[{"type":"text","text":"hi"}],"stop_reason":"end_turn","usage":{"input_tokens":3,"output_tokens":1}}"#;
 
-    /// A caller that answers from a list and builds no request itself: the tests hand `send` a [`Sent`] directly.
+    /// A caller that answers from a list and builds no request itself: the tests hand `send` a [`Sent`] directly. It
+    /// offers a native token count, as a live provider caller does.
     struct Live(Mutex<VecDeque<Result<Received, CallFailure>>>);
 
     impl ModelCaller for Live {
@@ -352,6 +356,12 @@ mod tests {
         fn read(&self, body: &RawJson, _: Range<u32>) -> Result<Received, CallFailure> {
             answer(body)
         }
+        fn count_tokens(
+            &self,
+            _: &RequestParts<'_>,
+        ) -> Option<BoxFuture<'_, Result<u64, CallFailure>>> {
+            Some(Box::pin(async { Ok(1) }))
+        }
     }
 
     fn sent(request: &str) -> Sent<()> {
@@ -369,6 +379,42 @@ mod tests {
         let mut f = CallFailure::new(ErrorKind::Upstream, "overloaded");
         f.status = status;
         Err(f)
+    }
+
+    #[tokio::test]
+    async fn every_decorator_sends_the_request_a_real_caller_builds() {
+        let real = || {
+            let client = Client::new(Target::anthropic("sk-test")).unwrap();
+            let chain = Chain::new(vec![Slot::new("main", client, "m")]).unwrap();
+            AnthropicCaller::new(chain, 256).unwrap()
+        };
+        let (null, params) = (RawJson::null(), real().params());
+        let content = RawJson::from_text(r#"[{"type":"text","text":"hi"}]"#).unwrap();
+        let parts = RequestParts {
+            protocol: "anthropic-messages",
+            system: &null,
+            tools: &null,
+            messages: vec![(Seq(1), Slice::User { content: &content })],
+            params: &params,
+        };
+        let (body, _) = real().prepare(&parts).unwrap();
+        let text = String::from_utf8(body.clone()).unwrap();
+        assert!(text.contains(content.as_str()), "{text}");
+
+        let rec = Recording::new(real());
+        let (recorded, held) = rec.prepare(&parts).unwrap();
+        assert_eq!((&recorded, &held.request), (&body, &text));
+
+        let rep = Replaying::new(real(), rec.cassette("m", "2026-11-27"), answer);
+        let (replayed, held) = rep.prepare(&parts).unwrap();
+        assert_eq!((&replayed, &held.request), (&body, &text));
+
+        // Only the script is sent: a real caller's own `send` would reach the network.
+        let script = Scripted::new(real(), [ok()]);
+        let (scripted, held) = script.prepare(&parts).unwrap();
+        assert_eq!(scripted, body);
+        script.send(held).await.unwrap();
+        assert_eq!(script.requests(), [text]);
     }
 
     #[tokio::test]
@@ -435,8 +481,11 @@ mod tests {
     }
 
     #[test]
-    fn a_recording_offers_no_native_count_so_it_decides_like_its_replay() {
-        let rec = Recording::new(Live(Mutex::new(VecDeque::new())));
+    fn no_decorator_forwards_the_native_count_so_a_recording_decides_like_its_replay() {
+        let live = || Live(Mutex::new(VecDeque::new()));
+        let rec = Recording::new(live());
+        let rep = Replaying::new(live(), rec.cassette("m", "2026-11-26"), answer);
+        let script = Scripted::new(live(), []);
         let (null, tools) = (RawJson::null(), RawJson::null());
         let parts = RequestParts {
             protocol: "anthropic-messages",
@@ -445,6 +494,9 @@ mod tests {
             messages: Vec::new(),
             params: &null,
         };
+        assert!(live().count_tokens(&parts).is_some());
         assert!(rec.count_tokens(&parts).is_none());
+        assert!(rep.count_tokens(&parts).is_none());
+        assert!(script.count_tokens(&parts).is_none());
     }
 }
