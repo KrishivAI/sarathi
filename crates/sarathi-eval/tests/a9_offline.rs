@@ -572,6 +572,10 @@ impl Harness for Theme {
 /// The structural acceptance check: the required tokens are set and text on background has contrast of at least 4.5.
 struct Structural;
 impl Acceptance for Structural {
+    fn handles(&self, check: &str) -> bool {
+        check == "structural"
+    }
+
     fn accepts(&self, _brief: &Brief, out: &HarnessOutput) -> bool {
         let set: BTreeMap<&str, &str> = out
             .artifact

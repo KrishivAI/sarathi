@@ -71,6 +71,9 @@ pub trait Harness {
 
 /// The check that decides whether a run's artifact is accepted. Named by `Brief::acceptance`.
 pub trait Acceptance {
+    /// Whether this is the check a brief's `acceptance` field names; a pass refuses a brief whose check it is not.
+    fn handles(&self, check: &str) -> bool;
+
     /// Whether `out` satisfies `brief`.
     fn accepts(&self, brief: &Brief, out: &HarnessOutput) -> bool;
 }
@@ -271,7 +274,7 @@ pub fn run_one(
 }
 
 /// An id becomes a directory name, so it must be a single plain path component.
-fn check_component(what: &str, id: &str) -> Result<(), RunnerError> {
+pub(crate) fn check_component(what: &str, id: &str) -> Result<(), RunnerError> {
     let bad = id.is_empty()
         || id == "."
         || id == ".."
@@ -323,7 +326,13 @@ pub fn write_records(root: &Path, date: &str, records: &[RunRecord]) -> Result<(
 struct Wrapper<'a>(&'a RunRecord);
 
 /// Save one record as its run ends: at [`record_path`], never over an existing file (a record is spend that was made),
-/// and whole or not at all (written and synced to `<run>.json.tmp`, then renamed). One writer per run directory.
+/// and whole or not at all (written and synced to `<run>.json.tmp`, then renamed, then the directory synced). One writer
+/// per run directory.
+///
+/// A save stopped half way leaves `<run>.json.tmp`, which [`read_records`] refuses. A save in progress has one too, so
+/// touch it only while no pass is running (the lock of the pass root is free). Then read it: if it is a whole record,
+/// rename it to `<run>.json` so its spend is counted and the run is not made again; if it is cut off, delete it (the run
+/// is made again, and its first spend is in no record).
 ///
 /// # Errors
 /// [`RunnerError::Invalid`] for an id that would leave the directory; [`RunnerError::Io`] if the record is already
@@ -350,7 +359,16 @@ pub fn save_record(root: &Path, date: &str, r: &RunRecord) -> Result<(), RunnerE
     let mut f = std::fs::File::create_new(&tmp).map_err(io)?;
     f.write_all(s.as_bytes()).map_err(io)?;
     f.sync_all().map_err(io)?;
-    std::fs::rename(&tmp, &path).map_err(io)
+    std::fs::rename(&tmp, &path).map_err(io)?;
+    sync_dir(path.parent().unwrap_or(root)).map_err(io)
+}
+
+/// Make a rename in `dir` durable. Only Unix opens a directory as a file.
+fn sync_dir(dir: &Path) -> std::io::Result<()> {
+    if cfg!(unix) {
+        std::fs::File::open(dir)?.sync_all()?;
+    }
+    Ok(())
 }
 
 /// Every record of the `purpose` pass under `<root>/<date>`, sorted by arm, brief and run; none if the directory is
@@ -464,6 +482,10 @@ mod tests {
     }
     struct AcceptOk;
     impl Acceptance for AcceptOk {
+        fn handles(&self, _: &str) -> bool {
+            true
+        }
+
         fn accepts(&self, _b: &Brief, o: &HarnessOutput) -> bool {
             o.artifact == "ok"
         }

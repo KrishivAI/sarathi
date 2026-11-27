@@ -381,7 +381,7 @@ pub fn run_within_caps_journaled(
 }
 
 /// The `done` records by (arm, brief, repetition), each checked to be a run of this pass and there once.
-fn done_runs<'r>(
+pub(crate) fn done_runs<'r>(
     done: &'r [RunRecord],
     briefs: &[Brief],
     arms: &[Arm<'_>],

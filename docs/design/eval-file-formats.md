@@ -35,3 +35,22 @@ reads N and N-1. Version 1 is the first of each, so no N-1 exists yet; the rules
 - `read_records` reads a whole pass back (version N and N-1) and skips nothing, because a skipped record is spend that
   goes uncounted: a file that is not a whole record (a left-over `.tmp` included), an unknown version or a record that
   is not at its own path is an error naming the file.
+- The directory is synced after the rename. To recover a left-over `<run>.json.tmp`, first make sure no pass is running
+  (`<root>/lock` is free: a save in progress has a `.tmp` too). Then, if it holds a whole record, rename it to
+  `<run>.json`; if it is cut off, delete it.
+
+## Pass directory (`<root>/<pass>/<date>/`)
+
+- One root holds every pass of a measurement: `<pass>` is `smoke`, `measure` or `tune-<round>` (rounds from 1). Under a
+  pass is one date (a stopped pass is resumed under it), holding the run records (`tune/` or `measure/`, as above) and
+  `report.md` and `report.json`. `<root>/lock` is locked while a pass runs.
+- Every record under the root counts towards the slot caps. Anything else under the root, and a record on a slot the
+  configuration lacks, is an error.
+
+## Proposal (the artifact the structural check reads)
+
+- One JSON object: `proposal` (1, `PROPOSAL_VERSION`), `errors`, `required_sections`, `sections`, `contrast`
+  (`pair`, `ratio`). Unknown fields and any other version are refused, and a refused artifact is a run not accepted.
+- Accepted: at least one valid operation, no error, at least one required section and none missing, at least one
+  contrast pair and every ratio from the minimum (4.5) to 21. It is stored in no run record.
+
