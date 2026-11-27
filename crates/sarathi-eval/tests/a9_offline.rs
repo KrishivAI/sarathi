@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
-//! The A9 offline run: the Theme Studio measurement briefs (`evals/vyasa/briefs.jsonl`) under the A9 run configuration
-//! (`evals/vyasa/a9-run.json`), driven through the real core `Driver`, recorded to cassettes by a scripted model and
+//! The A9 offline run: all 30 Theme Studio briefs (`evals/vyasa/briefs.jsonl`) under the A9 run configuration
+//! (`evals/vyasa/a9-run.json`): the 10 tuning briefs as the first tuning round (one run per harness on `strong`), then
+//! the 20 measurement briefs, driven through the real core `Driver`, recorded to cassettes by a scripted model and
 //! then replayed from them. It proves the measurement pipeline (arms, caps, pricing, cassettes, report, kill line)
 //! end to end before any live spend.
 //!
@@ -27,7 +28,7 @@ use sarathi_eval::cassette::{self, Cassette, Response};
 use sarathi_eval::config::{RunConfig, run_within_caps};
 use sarathi_eval::killline::Outcome;
 use sarathi_eval::measure::{CostTolerance, Judging, report};
-use sarathi_eval::metrics::{Purpose, TokenUsage};
+use sarathi_eval::metrics::{Purpose, RunRecord, TokenUsage};
 use sarathi_eval::report::{to_json, to_markdown};
 use sarathi_eval::runner::{Acceptance, Arm, Harness, HarnessError, HarnessOutput};
 use sarathi_log::{MemoryStore, RequestParts};
@@ -582,12 +583,12 @@ impl Acceptance for Structural {
     }
 }
 
-fn measurement_briefs() -> Vec<Brief> {
+fn briefs_of(split: Split) -> Vec<Brief> {
     let mut lines = BRIEFS.lines();
     lines.next().unwrap();
     lines
         .map(|l| serde_json::from_str::<Brief>(l).unwrap())
-        .filter(|b| b.split == Split::Measurement)
+        .filter(|b| b.split == split)
         .collect()
 }
 
@@ -606,19 +607,57 @@ fn arms<'a>(c: &RunConfig, harnesses: &'a [Theme]) -> Vec<Arm<'a>> {
         .collect()
 }
 
-fn pass(c: &RunConfig, briefs: &[Brief], mode: &Mode) -> (String, String) {
+fn themes(slots: &[&'static str], mode: &Mode) -> Vec<Theme> {
     let mut hs = Vec::new();
-    for s in &c.slots {
+    for &slot in slots {
         for name in ["old", "new"] {
             hs.push(Theme {
                 name,
-                slot: Box::leak(s.slot.clone().into_boxed_str()),
+                slot,
                 mode: mode.clone(),
             });
         }
     }
-    let run =
-        run_within_caps(c, briefs, &arms(c, &hs), &Structural, Purpose::Measure, &[]).unwrap();
+    hs
+}
+
+fn slot_names(c: &RunConfig) -> Vec<&'static str> {
+    c.slots
+        .iter()
+        .map(|s| &*Box::leak(s.slot.clone().into_boxed_str()))
+        .collect()
+}
+
+/// The first tuning round as the labelling sheet plans it: the tuning briefs, both harnesses, one run, on `strong`
+/// only. Its records are not part of the measurement; they count only against the `strong` cap.
+fn tune(c: &RunConfig, briefs: &[Brief], mode: &Mode) -> (Vec<RunRecord>, String) {
+    let mut t = c.clone();
+    t.runs = 1;
+    t.slots.retain(|s| s.slot == JUDGING.strong_slot);
+    let hs = themes(&[JUDGING.strong_slot], mode);
+    let run = run_within_caps(&t, briefs, &arms(&t, &hs), &Structural, Purpose::Tune, &[]).unwrap();
+    assert!(
+        run.stopped.is_empty(),
+        "no cap is near offline: {:?}",
+        run.stopped
+    );
+    let r = report(&t, &run, None, DATE, 0).unwrap();
+    assert!(r.kill_line.is_none(), "a tuning round has no kill line");
+    (run.records, to_markdown(&r))
+}
+
+/// The measurement: every slot, both harnesses, `runs` runs, after the tuning round (`earlier`, for the caps).
+fn pass(c: &RunConfig, briefs: &[Brief], mode: &Mode, earlier: &[RunRecord]) -> (String, String) {
+    let hs = themes(&slot_names(c), mode);
+    let run = run_within_caps(
+        c,
+        briefs,
+        &arms(c, &hs),
+        &Structural,
+        Purpose::Measure,
+        earlier,
+    )
+    .unwrap();
     let r = report(c, &run, Some(&JUDGING), DATE, 0).unwrap();
     assert!(
         r.stopped.is_empty(),
@@ -631,21 +670,40 @@ fn pass(c: &RunConfig, briefs: &[Brief], mode: &Mode) -> (String, String) {
     (to_json(&r).unwrap(), to_markdown(&r))
 }
 
+/// The whole offline run of one mode: the tuning round, then the measurement.
+fn all(c: &RunConfig, mode: &Mode) -> (Vec<RunRecord>, String, String, String) {
+    let tuning = briefs_of(Split::Tuning);
+    assert_eq!(tuning.len(), 10);
+    let measurement = briefs_of(Split::Measurement);
+    assert_eq!(measurement.len(), 20);
+    let (tuned, tune_md) = tune(c, &tuning, mode);
+    let (json, md) = pass(c, &measurement, mode, &tuned);
+    (tuned, tune_md, json, md)
+}
+
 #[test]
-fn the_measurement_briefs_run_offline_on_cassettes_and_replay_to_the_same_report() {
+fn all_30_briefs_run_offline_on_cassettes_and_replay_to_the_same_reports() {
     let c = RunConfig::from_json(A9).unwrap();
-    let briefs = measurement_briefs();
-    assert_eq!(briefs.len(), 20);
     let dir = std::env::temp_dir().join(format!("sarathi-a9-offline-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
-    let (recorded_json, recorded_md) = pass(&c, &briefs, &Mode::Record(dir.clone()));
-    let (replayed_json, replayed_md) = pass(&c, &briefs, &Mode::Replay(dir.clone()));
+    let (recorded_tuned, recorded_tune_md, recorded_json, recorded_md) =
+        all(&c, &Mode::Record(dir.clone()));
+    let (replayed_tuned, replayed_tune_md, replayed_json, replayed_md) =
+        all(&c, &Mode::Replay(dir.clone()));
+    assert_eq!(
+        recorded_tuned, replayed_tuned,
+        "a replay reproduces the tuning round"
+    );
+    assert_eq!(recorded_tune_md, replayed_tune_md);
     assert_eq!(
         recorded_json, replayed_json,
         "a replay reproduces the recorded run's report"
     );
     assert_eq!(recorded_md, replayed_md);
-    // 20 briefs x 3 runs x 3 slots x 2 harnesses, one `<run>.jsonl` cassette each (arm / brief / run).
+    // 10 tuning briefs x 1 run x 2 harnesses on `strong`, all tuning records (the guard refuses a measurement brief).
+    assert_eq!(recorded_tuned.len(), 10 * 2);
+    assert!(recorded_tuned.iter().all(|r| r.purpose == Purpose::Tune));
+    // Plus 20 briefs x 3 runs x 3 slots x 2 harnesses, one `<run>.jsonl` cassette each (arm / brief / run).
     let files = std::fs::read_dir(&dir)
         .unwrap()
         .flat_map(|arm| std::fs::read_dir(arm.unwrap().path()).unwrap())
@@ -658,9 +716,12 @@ fn the_measurement_briefs_run_offline_on_cassettes_and_replay_to_the_same_report
                 .is_some_and(|e| e == "jsonl")
         })
         .count();
-    assert_eq!(files, 6 * 20 * 3);
+    assert_eq!(files, 10 * 2 + 6 * 20 * 3);
     if let Ok(out) = std::env::var("SARATHI_A9_OFFLINE_REPORT") {
         std::fs::write(out, &recorded_md).unwrap();
+    }
+    if let Ok(out) = std::env::var("SARATHI_A9_OFFLINE_TUNING_REPORT") {
+        std::fs::write(out, &recorded_tune_md).unwrap();
     }
     let _ = std::fs::remove_dir_all(&dir);
 }
