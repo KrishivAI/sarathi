@@ -12,6 +12,12 @@ unless a caller passes a live provider explicitly.
   group; earlier records count; arms are `<harness>.<slot>`; `CappedRun::stopped` goes to `Report::stopped` and
   `ArmPair::stopped`). A pass that spends money uses `run_within_caps_journaled` with a `Journal`: every record is
   saved as its run ends and a restarted pass takes the saved ones as `done`, so only the missing runs are made.
+- `pass.rs`: `Pass`, one pass that spends money (`PassKind` smoke, tuning round, measurement) over one root that holds
+  every pass's records: earlier spend is read from disk, `prepare` is the dry run (`Summary`), `run` locks the root,
+  saves each record and writes the reports; the measurement starts only after a smoke run whose finished runs, projected,
+  are within every cap.
+- `structural.rs`: the `Structural` acceptance check over the host-written `Proposal` artifact (valid operation, no
+  validator error, required sections kept, contrast).
 - `killline.rs`: the kill-line rule as one pure function; the tolerance is an input.
 - `measure.rs`: a `CappedRun` to its `Report`: stats per arm (slots, then harnesses, in configuration order), the kill
   line over the old/new pair of each slot under a `Judging` rule stated before the run (old, new, strong slot, cost
