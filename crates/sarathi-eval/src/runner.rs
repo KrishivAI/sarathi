@@ -71,6 +71,9 @@ pub trait Harness {
 
 /// The check that decides whether a run's artifact is accepted. Named by `Brief::acceptance`.
 pub trait Acceptance {
+    /// Whether this is the check a brief's `acceptance` field names; a pass refuses a brief whose check it is not.
+    fn handles(&self, check: &str) -> bool;
+
     /// Whether `out` satisfies `brief`.
     fn accepts(&self, brief: &Brief, out: &HarnessOutput) -> bool;
 }
@@ -326,7 +329,8 @@ struct Wrapper<'a>(&'a RunRecord);
 /// and whole or not at all (written and synced to `<run>.json.tmp`, then renamed, then the directory synced). One writer
 /// per run directory.
 ///
-/// A save stopped half way leaves `<run>.json.tmp`, which [`read_records`] refuses. Read it: if it is a whole record,
+/// A save stopped half way leaves `<run>.json.tmp`, which [`read_records`] refuses. A save in progress has one too, so
+/// touch it only while no pass is running (the lock of the pass root is free). Then read it: if it is a whole record,
 /// rename it to `<run>.json` so its spend is counted and the run is not made again; if it is cut off, delete it (the run
 /// is made again, and its first spend is in no record).
 ///
@@ -478,6 +482,10 @@ mod tests {
     }
     struct AcceptOk;
     impl Acceptance for AcceptOk {
+        fn handles(&self, _: &str) -> bool {
+            true
+        }
+
         fn accepts(&self, _b: &Brief, o: &HarnessOutput) -> bool {
             o.artifact == "ok"
         }

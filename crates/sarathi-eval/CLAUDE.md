@@ -16,6 +16,7 @@ unless a caller passes a live provider explicitly.
   every pass's records: earlier spend is read from disk, `prepare` is the dry run (`Summary`), `run` locks the root,
   saves each record and writes the reports; the measurement starts only after a smoke run whose finished runs, projected,
   are within every cap.
+- A pass takes its `Acceptance` check in `prepare` and refuses a brief set naming a check it does not `handle`.
 - `structural.rs`: the `Structural` acceptance check over the host-written `Proposal` artifact (valid operation, no
   validator error, required sections kept, contrast).
 - `killline.rs`: the kill-line rule as one pure function; the tolerance is an input.

@@ -131,8 +131,9 @@ pub struct Summary {
 }
 
 /// A checked pass and what the root already holds.
-#[derive(Debug)]
 pub struct Pass<'a> {
+    /// The check that judges the runs, and that handles every brief's `acceptance` name.
+    acceptance: &'a dyn Acceptance,
     /// The configuration and brief set as given, to check again under the lock.
     given: (&'a RunConfig, &'a [Brief]),
     /// The configuration narrowed to this pass (its slots and repetitions).
@@ -149,6 +150,16 @@ pub struct Pass<'a> {
     summary: Summary,
 }
 
+impl std::fmt::Debug for Pass<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Pass")
+            .field("kind", &self.kind)
+            .field("date", &self.date)
+            .field("summary", &self.summary)
+            .finish_non_exhaustive()
+    }
+}
+
 /// Stands in for a harness where only the plan is checked.
 struct Unused;
 impl Harness for Unused {
@@ -158,21 +169,32 @@ impl Harness for Unused {
 }
 
 impl<'a> Pass<'a> {
-    /// Check the pass against the brief set `set`, the configuration and the records under `root`. Reads only.
+    /// Check the pass against the brief set `set`, the configuration, the check that will judge it and the records
+    /// under `root`. Reads only.
     ///
     /// # Errors
-    /// [`PassError::Invalid`] for an unknown or tuning smoke brief, tuning round 0 or an unknown slot;
+    /// [`PassError::Invalid`] for a brief anywhere in `set` whose `acceptance` name `acceptance` does not handle, an
+    /// unknown or repeated smoke brief, tuning round 0 or an unknown slot; [`PassError::Runner`] for a tuning brief in
+    /// the smoke run;
     /// [`PassError::Dir`] for anything under the root that is not a pass's records or reports, or a second date for
     /// this pass; the runner's, the records' and the judging rule's errors as their variants.
     pub fn prepare(
         config: &'a RunConfig,
         set: &'a [Brief],
         kind: PassKind<'a>,
+        acceptance: &'a dyn Acceptance,
         root: &'a Path,
         date: &'a str,
     ) -> Result<Self, PassError> {
         // Before any spend: a date that no record could be saved under.
         check_component("date", date)?;
+        // Also before any spend, and over the whole set, so a later pass cannot be the first to find it.
+        if let Some(b) = set.iter().find(|b| !acceptance.handles(&b.acceptance)) {
+            return Err(PassError::Invalid(format!(
+                "brief `{}` names the acceptance check `{}`, which this pass's check does not handle",
+                b.id, b.acceptance
+            )));
+        }
         let given = (config, set);
         let (config, briefs, purpose) = narrow(config, set, &kind)?;
         let name = kind.dir_name();
@@ -241,6 +263,7 @@ impl<'a> Pass<'a> {
             slots,
         };
         Ok(Self {
+            acceptance,
             given,
             config,
             briefs,
@@ -272,7 +295,6 @@ impl<'a> Pass<'a> {
     pub fn run<'h>(
         self,
         harness: impl Fn(&str, &SlotConfig) -> &'h dyn Harness,
-        acceptance: &dyn Acceptance,
         deviations: u32,
     ) -> Result<(CappedRun, Report), PassError> {
         let dir_err =
@@ -292,7 +314,14 @@ impl<'a> Pass<'a> {
         })?;
         // Another pass may have added records between `prepare` and the lock.
         let (config, set) = self.given;
-        let this = Pass::prepare(config, set, self.kind, self.root, self.date)?;
+        let this = Pass::prepare(
+            config,
+            set,
+            self.kind,
+            self.acceptance,
+            self.root,
+            self.date,
+        )?;
         if matches!(this.kind, PassKind::Measure { .. }) && this.done.is_empty() {
             ready(&this.summary)?;
         }
@@ -304,7 +333,7 @@ impl<'a> Pass<'a> {
             &this.config,
             &this.briefs,
             &arms,
-            acceptance,
+            this.acceptance,
             this.purpose,
             &this.earlier,
             Journal {
