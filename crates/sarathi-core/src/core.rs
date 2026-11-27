@@ -169,7 +169,8 @@ impl Answer {
 /// Called by the core (no IO, no waiting) when a turn would end [`Outcome::Finished`]. `Some(text)` refuses: `text`
 /// goes to the model as a message and the turn goes on; at most [`MAX_COMPLETION_REFUSALS`] in a turn, after which
 /// the turn ends [`Outcome::RanOut`]. The check reads state the host's tools keep (see
-/// [`crate::toolbox::ToolboxTools::with_gate`]); it is not in the log, so a resumed session starts it afresh.
+/// [`crate::toolbox::ToolboxTools::with_gate`]); it is not in the log, so a resumed session starts it afresh, and so
+/// does the refusal count: a turn resumed after a crash may be sent back [`MAX_COMPLETION_REFUSALS`] more times.
 pub trait Completion: std::fmt::Debug + Send + Sync {
     /// `None` lets the turn finish.
     fn check(&self) -> Option<String>;
@@ -647,8 +648,8 @@ impl Core {
     }
 
     /// A core in the middle of a turn a restart cut short, and what to do first. The config is as for
-    /// [`Core::new`], with `next_seq` the log's next seq and `history` the segment's slices so far. The turn's spend
-    /// and its count of failures in a row start again from zero.
+    /// [`Core::new`], with `next_seq` the log's next seq and `history` the segment's slices so far. The turn's spend,
+    /// its count of failures in a row and its count of completion refusals start again from zero.
     pub fn resume(config: CoreConfig, open: OpenTurn) -> (Core, Vec<Action>) {
         let mut core = Core::new(config);
         let mut out = Vec::new();

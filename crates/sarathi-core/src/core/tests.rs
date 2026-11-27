@@ -1300,6 +1300,42 @@ mod resume {
         }
     }
 
+    #[derive(Debug)]
+    struct Never;
+    impl Completion for Never {
+        fn check(&self) -> Option<String> {
+            Some("not yet".into())
+        }
+    }
+
+    /// The refusal count is memory only: a turn resumed after a crash gets the full budget again, then ends `RanOut`.
+    #[test]
+    fn a_resumed_turn_has_its_full_completion_refusals_again() {
+        let mut config = CoreConfig::new(ModelProfile::native(), tools(), Seq(1));
+        config.history = vec![Seq(2)];
+        config.next_seq = Seq(5);
+        config.completion = Some(Arc::new(Never));
+        let (core, actions) = Core::resume(config, open(1, ResumeAt::Call));
+        let mut h = Harness {
+            core,
+            expected: 5,
+            calling: Seq(0),
+            log: Vec::new(),
+        };
+        let mut a = h.track(actions);
+        let mut sent_back = 0;
+        // Bounded: if the cap regresses the test fails here instead of looping forever.
+        for _ in 0..=MAX_COMPLETION_REFUSALS {
+            a = h.answer(native(Some("Done."), &[], "end_turn"));
+            if turn_end(&a).is_some() {
+                break;
+            }
+            sent_back += 1;
+        }
+        assert_eq!(sent_back, MAX_COMPLETION_REFUSALS);
+        assert_eq!(turn_end(&a).unwrap().outcome, Outcome::RanOut);
+    }
+
     #[test]
     fn a_started_write_is_answered_cut_short_and_never_run() {
         let answer = native(
