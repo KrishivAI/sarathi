@@ -1,3 +1,5 @@
+<img src="assets/brand/png/sarathi-mark-256.png" alt="Sarathi mark: a peacock-feather eye" width="96">
+
 # Sarathi
 
 An embeddable agent harness in Rust: the run loop, context and compaction, tools and permissions, an append-only
