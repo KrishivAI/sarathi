@@ -3,6 +3,7 @@
 svg[data-state="idle"] .body{animation:sway 5s ease-in-out infinite;transform-box:view-box;transform-origin:32px 60px}
 svg[data-state="listening"] .ring1{animation:ripple 1.6s ease-out infinite}
 svg[data-state="listening"] .eye{animation:open 1.6s ease-in-out infinite}
+/* the stagger counts paths in .body: the vane is the first, the six barbs are the second to seventh, top to bottom */
 svg[data-state="thinking"] .barb{animation:run 1.2s ease-in-out infinite}
 svg[data-state="thinking"] .barb:nth-of-type(3){animation-delay:.15s} svg[data-state="thinking"] .barb:nth-of-type(4){animation-delay:.3s}
 svg[data-state="thinking"] .barb:nth-of-type(5){animation-delay:.45s} svg[data-state="thinking"] .barb:nth-of-type(6){animation-delay:.6s}

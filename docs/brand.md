@@ -44,9 +44,13 @@ Put the SVG markup inline in the page: a page cannot change `data-state` inside 
 document.querySelector("#sarathi-icon").setAttribute("data-state", "thinking");
 ```
 
-Here `sarathi-icon` is an `id` you add to the root `<svg>` of your inline copy. Once inline, the file's `<style>` rules
-(its class names, such as `s`, `body` and `eye`, and its keyframe names, such as `sway` and `run`) and its gradient ids
-`g-vane` and `g-eye` share the page's names; check that your page does not use them for something else.
+Here `sarathi-icon` is an `id` you add to the root `<svg>` of your inline copy. Once inline, these names are shared with
+the page; check that your page does not use them for something else:
+
+- classes `s`, `body`, `barb`, `ring1`, `eye` and `core`;
+- keyframes `sway`, `ripple`, `open`, `run`, `glint` and `lift`;
+- gradient ids `g-vane` and `g-eye`. The mark and the app icon define the same two ids with the same colours, so inline
+  copies of them can share a page; do not recolour one of them under the same ids.
 
 Under `prefers-reduced-motion: reduce` the icon does not animate. Keep that rule, and do not let motion be the only
 sign of a state: say it in text too, for people who cannot see the animation.
