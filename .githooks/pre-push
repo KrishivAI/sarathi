@@ -3,6 +3,8 @@
 # Sarathi pre-push: refuses to push a commit whose author, committer or sign-off
 # and co-author trailers are not an allowed identity (scripts/commit-identity.sh;
 # CI runs the same check). Only commits the remote does not have yet are read.
+# A push to a URL instead of a named remote matches no remote-tracking ref, so
+# the whole history is read: the same answer, only slower.
 # Enabled by `git config core.hooksPath .githooks`.
 set -euo pipefail
 

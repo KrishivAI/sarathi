@@ -7,7 +7,8 @@ Thank you for your interest. Sarathi is an embeddable agent harness in Rust; see
   (`.github/scripts/check-ai-attribution.sh` fails the PR).
 - **Identity:** the author, the committer and every `Co-authored-by` / `Signed-off-by` address must be listed in
   `scripts/commit-identity.sh` (CI fails the PR and names the commit and the address). A look-alike address can
-  belong to another person. A new contributor's address is added to the list by a maintainer first.
+  belong to another person. A new contributor's address is added to the list by a maintainer first: CI checks
+  a PR against the list on its base branch. A squash message edited at merge time is not checked.
 - **SPDX:** every `.rs`, `.sh` and `.py` file starts with `SPDX-License-Identifier: Apache-2.0` (within the first 5 lines).
 - **One change, one branch, one PR**, kept small (at most about 2,000 counted lines). Never push to `main`; open a PR.
 - **No live model calls** in tests or CI: use the scripted provider or recorded cassettes.

@@ -118,5 +118,31 @@ git update-ref refs/remotes/origin/old "$bad"
 after=$(commit "$one" "$one" after)
 expect 0 "commit-identity: OK" "push: commits the remote already has are not read" push "$after" "$zero"
 
+# The workflow step: the base's copy of the check decides, so a head that adds
+# its own address to the list does not pass with it. The step's text is run as it
+# stands in the workflow.
+step=$(awk '/^      - name: Commit identity$/ { in_step = 1; next }
+  in_step && /^      - / { exit }
+  run && /^          / { print substr($0, 11) }
+  in_step && /^        run: \|$/ { run = 1 }' "$root/.github/workflows/pr-policy.yml")
+[ -n "$step" ] || { echo "FAIL: no 'run: |' block in the workflow step 'Commit identity'" >&2; failed=1; }
+ci_step() { env BASE_SHA="$1" HEAD_SHA="$2" RUNNER_TEMP="$tmp" bash -e -c "$step"; }
+
+git reset -q --hard "$base"
+git add scripts/commit-identity.sh
+without=$base
+with=$(commit "$one" "$one" "add the check")
+sed -i "s/^authors='/&$other\n/" scripts/commit-identity.sh
+git add scripts/commit-identity.sh
+edited=$(commit "$other" "$other" "list myself")
+expect 0 "commit-identity: OK" "the edited list would pass its own commit" \
+  scripts/commit-identity.sh "$with" "$edited"
+expect 1 "author email '$other'" "step: a head editing the list is checked against the base list" \
+  ci_step "$with" "$edited"
+expect 0 "commit-identity: OK" "step: a base without the check uses the checkout's copy" \
+  ci_step "$without" "$with"
+expect 128 "" "step: an unknown base fails" \
+  ci_step 0123456789012345678901234567890123456789 "$edited"
+
 [ "$failed" -eq 0 ] && echo "commit-identity-test: all passed"
 exit "$failed"
