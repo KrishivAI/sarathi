@@ -47,6 +47,16 @@ jobs:
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
         run: scripts/dco.sh "$BASE_SHA" "$HEAD_SHA"
+      - name: Commit identity check works
+        run: scripts/commit-identity-test.sh
+      - name: Commit identity
+        if: github.event_name == 'pull_request'
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          PR_TITLE: ${{ github.event.pull_request.title }}
+          PR_BODY: ${{ github.event.pull_request.body }}
+        run: scripts/commit-identity.sh "$BASE_SHA" "$HEAD_SHA"
       - name: No AI attribution
         if: github.event_name == 'pull_request'
         env:
