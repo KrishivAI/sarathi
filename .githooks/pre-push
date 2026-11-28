@@ -1,0 +1,26 @@
+#!/usr/bin/env bash
+# SPDX-License-Identifier: Apache-2.0
+# Sarathi pre-push: refuses to push a commit whose author, committer or sign-off
+# and co-author trailers are not an allowed identity (scripts/commit-identity.sh;
+# CI runs the same check). Only commits the remote does not have yet are read.
+# A push to a URL instead of a named remote matches no remote-tracking ref, so
+# the whole history is read: the same answer, only slower.
+# Enabled by `git config core.hooksPath .githooks`.
+set -euo pipefail
+
+root=$(git rev-parse --show-toplevel)
+remote=$1
+bad=0
+
+# One line per ref: local ref, local id, remote ref, remote id.
+while read -r _ local_sha _ remote_sha; do
+  # An all-zero local id deletes the ref: nothing is sent.
+  [[ $local_sha =~ ^0+$ ]] && continue
+  revs=("$local_sha" --not "--remotes=$remote")
+  if git cat-file -e "$remote_sha^{commit}" 2>/dev/null; then
+    revs+=("$remote_sha")
+  fi
+  bash "$root/scripts/commit-identity.sh" --revs "${revs[@]}" || bad=1
+done
+
+exit "$bad"

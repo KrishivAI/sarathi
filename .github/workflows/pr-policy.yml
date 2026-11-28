@@ -47,6 +47,28 @@ jobs:
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
         run: scripts/dco.sh "$BASE_SHA" "$HEAD_SHA"
+      - name: Commit identity check works
+        run: scripts/commit-identity-test.sh
+      # Only the pull_request event names the base, head, title and body; a PR's
+      # commits are checked there, so merge_group and push skip this step.
+      # The base's copy of the script decides, so a PR cannot add its own address
+      # to the list and pass with it. The checkout's copy runs only while the base
+      # has none.
+      - name: Commit identity
+        if: github.event_name == 'pull_request'
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          PR_TITLE: ${{ github.event.pull_request.title }}
+          PR_BODY: ${{ github.event.pull_request.body }}
+        run: |
+          script=scripts/commit-identity.sh
+          git cat-file -e "$BASE_SHA^{commit}"
+          if git cat-file -e "$BASE_SHA:$script" 2>/dev/null; then
+            git show "$BASE_SHA:$script" > "$RUNNER_TEMP/commit-identity.sh"
+            script="$RUNNER_TEMP/commit-identity.sh"
+          fi
+          bash "$script" "$BASE_SHA" "$HEAD_SHA"
       - name: No AI attribution
         if: github.event_name == 'pull_request'
         env:
